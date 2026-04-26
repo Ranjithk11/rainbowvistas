@@ -94,10 +94,7 @@ export async function stm32Dispense(
     /Product drop detected|Product detected|Request sequence finished|^200$|Response 200/i;
   const errorPattern = opts?.errorPattern ?? /^ERROR\b/i;
 
-  const shouldPrefix = commandPrefix.length > 0 && /^\d+$/.test(code);
-  const effectiveCode = shouldPrefix && !code.toUpperCase().startsWith(commandPrefix.toUpperCase())
-    ? `${commandPrefix}${code}`
-    : code;
+  const effectiveCode = code.toUpperCase().startsWith(commandPrefix.toUpperCase()) ? code : `${commandPrefix}${code}`;
   const command = `${effectiveCode}${commandSuffix}`;
 
   // Dynamic import to avoid webpack bundling issues
@@ -247,16 +244,13 @@ export async function stm32DispenseMany(
   ): Promise<DispenseResult> => {
     const rawLines: string[] = [];
     const prefix = typeof prefixOverride === "string" ? prefixOverride : commandPrefix;
-    const shouldPrefix = prefix.length > 0 && /^\d+$/.test(code);
-    const effectiveCode = shouldPrefix && !code.toUpperCase().startsWith(prefix.toUpperCase())
-      ? `${prefix}${code}`
-      : code;
+    const effectiveCode =
+      prefix.length > 0 && code.toUpperCase().startsWith(prefix.toUpperCase()) ? code : `${prefix}${code}`;
     const command = `${effectiveCode}${commandSuffix}`;
 
-    // For door/finalize commands, wait for "200" which indicates door cycle complete.
-    // This ensures user has time to pick up products and close door before next dispense.
-    const finalizeCommands = new Set(["TRAY", "REOPEN"]);
-    const isTrayCommand = finalizeCommands.has(code.trim().toUpperCase());
+    // For TRAY commands, wait for "200" which indicates door closed and cycle complete
+    // This ensures user has time to pick up products and close door before next dispense
+    const isTrayCommand = code.trim().toUpperCase() === "TRAY";
     const trayOkPattern = /^200$/i;
     
     const ok = isTrayCommand ? trayOkPattern : (patterns?.okPattern ?? okPattern);

@@ -64,37 +64,14 @@ export async function POST(request: NextRequest) {
       // Send RQ command to STM32 for dispense
       if (action === "dispense") {
         try {
-          const slotOffsetRaw = process.env.STM32_SLOT_ID_OFFSET;
-          const slotOffset = typeof slotOffsetRaw === "string" ? Number(slotOffsetRaw) : 0;
-
-          const dispensePrefix = (() => {
-            const v = process.env.STM32_DISPENSE_PREFIX;
-            if (typeof v !== "string") return "RQ";
-            return v.trim();
-          })();
-
-          const trayCommand = (() => {
-            const v = process.env.STM32_TRAY_COMMAND;
-            if (typeof v !== "string") return "TRAY";
-            const n = v.trim();
-            return n.length > 0 ? n : "TRAY";
-          })();
-
-          const effectiveSlotId = (() => {
-            const n = Number(slotId);
-            if (!Number.isFinite(n)) return slotId;
-            if (!Number.isFinite(slotOffset) || slotOffset === 0) return String(n);
-            return String(n + slotOffset);
-          })();
-
-          const result = await stm32Dispense(cfg, effectiveSlotId, {
-            commandPrefix: dispensePrefix,
-            okPattern: /Request sequence finished|^200$|Response 200|Turning off motors/i,
+          const result = await stm32Dispense(cfg, slotId, {
+            commandPrefix: "",
+            okPattern: /Request sequence finished|^200$|Response 200/i,
             errorPattern: /^(500|501)$|^ERROR\b|fail|invalid/i,
           });
 
-          const autoFinalize = (() => {
-            const v = process.env.STM32_AUTO_TRAY_AFTER_SINGLE;
+          const autoReopen = (() => {
+            const v = process.env.STM32_AUTO_REOPEN_AFTER_DISPENSE;
             if (typeof v !== "string") return true;
             const n = v.trim().toLowerCase();
             return n === "" || n === "1" || n === "true" || n === "yes";
@@ -102,13 +79,13 @@ export async function POST(request: NextRequest) {
 
           const rawLines = [...(result.rawLines || [])];
 
-          if (autoFinalize && result.okLine && !result.errorLine) {
-            const finalizeRes = await stm32Dispense(cfg, trayCommand, {
+          if (autoReopen && result.okLine && !result.errorLine) {
+            const reopenRes = await stm32Dispense(cfg, "REOPEN", {
               commandPrefix: "",
-              okPattern: /Request sequence finished|^200$|Response 200|Closing door|Door opened|Opening dispensing door|Waiting/i,
+              okPattern: /REOPEN complete|^200$/i,
               errorPattern: /error|fail|invalid/i,
             });
-            rawLines.push(...(finalizeRes.rawLines || []));
+            rawLines.push(...(reopenRes.rawLines || []));
           }
           
           if (result.okLine) {
