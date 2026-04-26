@@ -109,6 +109,8 @@ export async function POST(req: Request) {
 
     const cfg = getStm32Config();
 
+    const trayCommand = (getEnvString("STM32_TRAY_COMMAND") || "REOPEN").trim().toUpperCase();
+
     const codes: string[] = Array.isArray(body.productCodes)
       ? body.productCodes
       : typeof body.productCode === "string"
@@ -142,8 +144,9 @@ export async function POST(req: Request) {
       const productCode = normalized[0];
       sentCommands = [productCode];
       const res = await stm32Dispense(cfg, productCode, {
-        okPattern: /Turning off motors/i,
-        errorPattern: /^(500|501)$|No detection|Sensor already/i,
+        commandPrefix: "",
+        okPattern: /Request sequence finished|^200$|Response 200|Turning off motors/i,
+        errorPattern: /^(500|501)$|No detection|Sensor already|^ERROR\b|fail|invalid/i,
       });
       results.push({
         productCode,
@@ -155,14 +158,14 @@ export async function POST(req: Request) {
 
       const shouldAutoTray = getEnvBoolean("STM32_AUTO_TRAY_AFTER_SINGLE");
       if (shouldAutoTray && Boolean(res.okLine) && !res.errorLine) {
-        sentCommands = [...sentCommands, "TRAY"];
-        const trayRes = await stm32Dispense(cfg, "TRAY", {
+        sentCommands = [...sentCommands, trayCommand];
+        const trayRes = await stm32Dispense(cfg, trayCommand, {
           commandPrefix: "",
-          okPattern: /^200$|Closing door|Waiting 5s for pickup/i,
-          errorPattern: /^(500|501)$|No detection|Sensor already/i,
+          okPattern: /Request sequence finished|^200$|Response 200|Closing door|Door opened|Opening dispensing door|Waiting 5s for pickup|Waiting 10 seconds/i,
+          errorPattern: /^(500|501)$|No detection|Sensor already|^ERROR\b|fail|invalid/i,
         });
         results.push({
-          productCode: "TRAY",
+          productCode: trayCommand,
           ok: Boolean(trayRes.okLine) && !trayRes.errorLine,
           okLine: trayRes.okLine,
           errorLine: trayRes.errorLine,
@@ -234,22 +237,18 @@ export async function POST(req: Request) {
 
         for (let i = 0; i < normalized.length; i++) {
           const c = normalized[i];
-          const trimmed = c.trim();
-          const isRq = /^RQ\s*\d+$/i.test(trimmed);
-          const isNumeric = /^\d+$/.test(trimmed);
-
-          expanded.push(isRq ? trimmed : isNumeric ? `RQ${trimmed}` : trimmed);
+          expanded.push(c.trim());
           batchCount++;
 
           const isLast = i === normalized.length - 1;
           if (!isLast && batchCount >= effectiveBatchSize) {
-            expanded.push("TRAY");
+            expanded.push(trayCommand);
             batchCount = 0;
           }
         }
 
         // Always end at home for pickup.
-        expanded.push("TRAY");
+        expanded.push(trayCommand);
 
         sentCommands = expanded;
 
@@ -299,13 +298,10 @@ export async function POST(req: Request) {
           // Sort items within row by original index
           items.sort((a, b) => a.originalIndex - b.originalIndex);
           for (const { code } of items) {
-            const trimmed = code.trim();
-            const isRq = /^RQ\s*\d+$/i.test(trimmed);
-            const isNumeric = /^\d+$/.test(trimmed);
-            expanded.push(isRq ? trimmed : isNumeric ? `RQ${trimmed}` : trimmed);
+            expanded.push(code.trim());
           }
           // TRAY after each row
-          expanded.push("TRAY");
+          expanded.push(trayCommand);
         }
 
         sentCommands = expanded;
@@ -330,11 +326,8 @@ export async function POST(req: Request) {
       } else if (finalizeMode === "each") {
         const expanded: string[] = [];
         for (const c of normalized) {
-          const trimmed = c.trim();
-          const isRq = /^RQ\s*\d+$/i.test(trimmed);
-          const isNumeric = /^\d+$/.test(trimmed);
-          expanded.push(isRq ? trimmed : isNumeric ? `RQ${trimmed}` : trimmed);
-          expanded.push("TRAY");
+          expanded.push(c.trim());
+          expanded.push(trayCommand);
         }
 
         sentCommands = expanded;
@@ -356,9 +349,10 @@ export async function POST(req: Request) {
           });
         }
       } else {
-        sentCommands = [...normalized, "TRAY"];
+        sentCommands = [...normalized, trayCommand];
         const batch = await stm32DispenseMany(cfg, normalized, {
-          finalizeCommand: "TRAY",
+          commandPrefix: "",
+          finalizeCommand: trayCommand,
           okPattern: rqOkPattern,
           errorPattern: rqErrorPattern,
           finalizeOkPattern: trayOkPattern,
@@ -384,8 +378,8 @@ export async function POST(req: Request) {
       try {
         const { adminDb } = await import("@/lib/admin-db");
 
-        // Only decrement for actual product dispense commands; ignore TRAY.
-        const slotCodes = sentCommands.filter((c) => String(c).trim().toUpperCase() !== "TRAY");
+        // Only decrement for actual product dispense commands; ignore finalize door/tray command.
+        const slotCodes = sentCommands.filter((c) => String(c).trim().toUpperCase() !== trayCommand);
 
         // Decrement each code by 1 (or by the number of times it appears).
         const counts = new Map<number, number>();

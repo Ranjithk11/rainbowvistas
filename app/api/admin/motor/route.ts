@@ -64,7 +64,39 @@ export async function POST(request: NextRequest) {
       // Send RQ command to STM32 for dispense
       if (action === "dispense") {
         try {
-          const result = await stm32Dispense(cfg, slotId);
+          const slotOffsetRaw = process.env.STM32_SLOT_ID_OFFSET;
+          const slotOffset = typeof slotOffsetRaw === "string" ? Number(slotOffsetRaw) : 0;
+
+          const effectiveSlotId = (() => {
+            const n = Number(slotId);
+            if (!Number.isFinite(n)) return slotId;
+            if (!Number.isFinite(slotOffset) || slotOffset === 0) return String(n);
+            return String(n + slotOffset);
+          })();
+
+          const result = await stm32Dispense(cfg, effectiveSlotId, {
+            commandPrefix: "",
+            okPattern: /Request sequence finished|^200$|Response 200/i,
+            errorPattern: /^(500|501)$|^ERROR\b|fail|invalid/i,
+          });
+
+          const autoReopen = (() => {
+            const v = process.env.STM32_AUTO_REOPEN_AFTER_DISPENSE;
+            if (typeof v !== "string") return true;
+            const n = v.trim().toLowerCase();
+            return n === "" || n === "1" || n === "true" || n === "yes";
+          })();
+
+          const rawLines = [...(result.rawLines || [])];
+
+          if (autoReopen && result.okLine && !result.errorLine) {
+            const reopenRes = await stm32Dispense(cfg, "REOPEN", {
+              commandPrefix: "",
+              okPattern: /REOPEN complete|^200$/i,
+              errorPattern: /error|fail|invalid/i,
+            });
+            rawLines.push(...(reopenRes.rawLines || []));
+          }
           
           if (result.okLine) {
             try {
@@ -82,13 +114,13 @@ export async function POST(request: NextRequest) {
               success: true,
               message: `Motor ${action} command sent for slot ${slotId}`,
               response: result.okLine,
-              rawLines: result.rawLines,
+              rawLines,
             });
           } else if (result.errorLine) {
             return NextResponse.json({
               success: false,
               message: `STM32 error: ${result.errorLine}`,
-              rawLines: result.rawLines,
+              rawLines,
             }, { status: 500 });
           }
         } catch (err) {

@@ -224,7 +224,7 @@ export default function SlotsPage() {
     };
   }, []);
 
-  const totalSlots = 60;
+  const totalSlots = 70;
 
   const gridSlots: SlotsGridSlot[] = useMemo(() => {
     return Array.from({ length: totalSlots }, (_, i) => {

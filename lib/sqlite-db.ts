@@ -421,14 +421,18 @@ function initDb() {
     FROM orders o
   `);
 
-  // Initialize 60 vending slots if they don't exist
+  // Initialize/backfill vending slots up to 70
   const slotCount = db.prepare('SELECT COUNT(*) as count FROM vending_slots').get() as { count: number };
+  const insertSlot = db.prepare('INSERT OR IGNORE INTO vending_slots (slot_id, quantity) VALUES (?, 0)');
   if (slotCount.count === 0) {
-    const insertSlot = db.prepare('INSERT INTO vending_slots (slot_id, quantity) VALUES (?, 0)');
-    for (let i = 1; i <= 60; i++) {
+    for (let i = 1; i <= 70; i++) {
       insertSlot.run(i);
     }
-    console.log('Initialized 60 vending slots');
+    console.log('Initialized 70 vending slots');
+  } else {
+    for (let i = 1; i <= 70; i++) {
+      insertSlot.run(i);
+    }
   }
 
   // Initialize default admin user if none exists
@@ -812,7 +816,7 @@ export const sqliteDb = {
       todayRevenue: orderStats.today_revenue || 0,
       todayScans,
       slotsAssigned: slotStats.slots_assigned || 0,
-      totalSlots: slotStats.total_slots || 60,
+      totalSlots: slotStats.total_slots || 70,
     };
   },
 

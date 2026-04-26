@@ -215,6 +215,12 @@ export default function AdminDashboardPage() {
   const uniqueBrowseProducts = browseProducts.filter((p: any) => !adminProductIds.has(p.id));
   const transformedProducts = [...browseProducts, ...adminProducts.filter((p: any) => !browseProducts.some((bp: any) => bp.id === p.id))];
 
+  const transformedProductsById = new Map<string, (typeof transformedProducts)[number]>();
+  transformedProducts.forEach((p: any) => {
+    transformedProductsById.set(String(p.id), p);
+    transformedProductsById.set(String(p.id).replace(/^products\//, ""), p);
+  });
+
   const handleCartClick = () => {
     router.push("/products");
   };
@@ -486,18 +492,22 @@ export default function AdminDashboardPage() {
   };
 
   const handleProductEditClick = (productId: string) => {
-    // Find the product to edit
-    const product = productsData?.find((p: Product) => p.id.toString() === productId);
-    if (product) {
-      setEditingProduct({
-        id: productId,
-        name: product.name,
-        category: product.category || "",
-        price: product.retail_price,
-        quantity: product.quantity,
-      });
-      setEditProductModalOpen(true);
+    const cleanId = String(productId).replace(/^products\//, "");
+    const mergedProduct = transformedProductsById.get(String(productId)) || transformedProductsById.get(cleanId);
+
+    if (!mergedProduct) {
+      setSnackbar({ open: true, message: "Product not found for editing.", severity: "error" });
+      return;
     }
+
+    setEditingProduct({
+      id: String(mergedProduct.id),
+      name: mergedProduct.name,
+      category: mergedProduct.category || "",
+      price: mergedProduct.retail_price || 0,
+      quantity: mergedProduct.amount ?? 0,
+    });
+    setEditProductModalOpen(true);
   };
 
   const handleSaveProduct = async (data: {

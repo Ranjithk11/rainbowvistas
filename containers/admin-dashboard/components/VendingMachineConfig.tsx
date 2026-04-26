@@ -24,7 +24,7 @@ export default function VendingMachineConfig({
   onSlotClick,
   selectedSlot,
   isSyncing = false,
-  totalSlots = 60,
+  totalSlots = 70,
   columns = 10,
 }: VendingMachineConfigProps) {
   const slotNumbers = Array.from({ length: totalSlots }, (_, i) => i + 1);
