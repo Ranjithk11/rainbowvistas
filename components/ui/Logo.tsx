@@ -64,7 +64,7 @@ export default function Logo({
       >
         {logoMark}
 
-        <Box sx={{ display: "flex", alignItems: "center", gap: 1.25 }}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, }}>
           <ActionButton
             variant="outline"
             icon={
