@@ -138,13 +138,34 @@ export async function POST(req: Request) {
 
     let sentCommands: string[] = [];
 
-    if (normalized.length === 1) {
-      const productCode = normalized[0];
-      sentCommands = [productCode];
-      const res = await stm32Dispense(cfg, productCode, {
-        okPattern: /Turning off motors/i,
-        errorPattern: /^(500|501)$|No detection|Sensor already/i,
-      });
+    // Firmware (`requestMotorSequence` in sketch_may25.ino) runs a FULL self-contained
+    // cycle for every RQ<slot> command: home -> travel -> spin motor -> travel to door
+    // -> doorOpen -> Serial.println(200) -> 15s hold -> doorClose -> home.
+    // So we simply send RQ<slot> per item, sequentially. No TRAY/REOPEN needed.
+    const delayBetweenCommandsMs = getEnvNumber("STM32_DELAY_BETWEEN_COMMANDS_MS") ?? 0;
+
+    const rqOkPattern = /^200$/;
+    const rqErrorPattern = /^(500|501)$|^ERROR\b/i;
+
+    // Normalize each code to RQ<n>
+    const expanded: string[] = normalized.map((c) => {
+      const trimmed = c.trim();
+      if (/^RQ\s*\d+$/i.test(trimmed)) return trimmed.toUpperCase().replace(/\s+/g, "");
+      if (/^\d+$/.test(trimmed)) return `RQ${trimmed}`;
+      return trimmed;
+    });
+
+    sentCommands = [...expanded];
+    console.log("[STM32 Dispense] Sending sequential RQ commands:", expanded);
+
+    const batch = await stm32DispenseMany(cfg, expanded, {
+      commandPrefix: "",
+      okPattern: rqOkPattern,
+      errorPattern: rqErrorPattern,
+      delayBetweenCommandsMs,
+    });
+
+    for (const { productCode, result: res } of batch) {
       results.push({
         productCode,
         ok: Boolean(res.okLine) && !res.errorLine,
@@ -152,230 +173,6 @@ export async function POST(req: Request) {
         errorLine: res.errorLine,
         rawLines: res.rawLines,
       });
-
-      const shouldAutoTray = getEnvBoolean("STM32_AUTO_TRAY_AFTER_SINGLE");
-      if (shouldAutoTray && Boolean(res.okLine) && !res.errorLine) {
-        sentCommands = [...sentCommands, "TRAY"];
-        const trayRes = await stm32Dispense(cfg, "TRAY", {
-          commandPrefix: "",
-          okPattern: /^200$|Closing door|Waiting 5s for pickup/i,
-          errorPattern: /^(500|501)$|No detection|Sensor already/i,
-        });
-        results.push({
-          productCode: "TRAY",
-          ok: Boolean(trayRes.okLine) && !trayRes.errorLine,
-          okLine: trayRes.okLine,
-          errorLine: trayRes.errorLine,
-          rawLines: trayRes.rawLines,
-        });
-      }
-    } else {
-      const delayBetweenCommandsMs = getEnvNumber("STM32_DELAY_BETWEEN_COMMANDS_MS") ?? 0;
-      const delayBeforeFinalizeMs = getEnvNumber("STM32_DELAY_BEFORE_FINALIZE_MS") ?? 0;
-
-
-      // Default batch size is 2 - dispense 2 products, then TRAY, then next 2
-      const trayBatchSize = getEnvNumber("STM32_TRAY_BATCH_SIZE") ?? 2;
-
-      const finalizeModeRaw = (getEnvString("STM32_FINALIZE_MODE") || "row").toLowerCase();
-
-      // Check if any products share the same column (last digit of slot ID)
-      const cols = normalized
-        .map((c) => getRqMotorNumber(c))
-        .filter((n): n is number => typeof n === "number")
-        .map((n) => getMotorColumn(n));
-
-      const seenCols = new Set<number>();
-      let hasDuplicateColumn = false;
-      for (const c of cols) {
-        if (seenCols.has(c)) {
-          hasDuplicateColumn = true;
-          break;
-        }
-        seenCols.add(c);
-      }
-
-      let finalizeMode = finalizeModeRaw;
-      if (finalizeModeRaw === "smart") {
-        // smart mode: use 'each' if same column, otherwise 'once'
-        finalizeMode = hasDuplicateColumn ? "each" : "once";
-      } else if (finalizeModeRaw === "row") {
-        // row mode: group by row, dispense all from same row together, then TRAY
-        // For 6,7,8,16,26: row 0 (6,7,8) dispense together -> TRAY -> row 1 (16) -> TRAY -> row 2 (26) -> TRAY
-        finalizeMode = "row";
-      } else if (finalizeModeRaw === "each") {
-        // each mode: always dispense one product, then TRAY
-        finalizeMode = "each";
-      }
-
-      console.log("[STM32 Dispense] normalized:", normalized, "cols:", cols, "hasDuplicateColumn:", hasDuplicateColumn, "finalizeMode:", finalizeMode);
-
-      const rqOkPattern = /Turning off motors/i;
-      const rqErrorPattern = /^(500|501)$|No detection|Sensor already/i;
-      const trayOkPattern = /^200$|Closing door|Waiting 5s for pickup/i;
-      const trayErrorPattern = rqErrorPattern;
-
-      const shouldBatchSingleSlot = (() => {
-        if (!(trayBatchSize > 0)) return false;
-        if (normalized.length <= Math.max(1, Math.floor(trayBatchSize))) return false;
-
-        const motors = normalized
-          .map((c) => getRqMotorNumber(c))
-          .filter((n): n is number => typeof n === "number");
-
-        if (motors.length !== normalized.length) return false;
-        return new Set(motors).size === 1;
-      })();
-
-      if (shouldBatchSingleSlot) {
-        const effectiveBatchSize = Math.max(1, Math.floor(trayBatchSize));
-        const expanded: string[] = [];
-        let batchCount = 0;
-
-        for (let i = 0; i < normalized.length; i++) {
-          const c = normalized[i];
-          const trimmed = c.trim();
-          const isRq = /^RQ\s*\d+$/i.test(trimmed);
-          const isNumeric = /^\d+$/.test(trimmed);
-
-          expanded.push(isRq ? trimmed : isNumeric ? `RQ${trimmed}` : trimmed);
-          batchCount++;
-
-          const isLast = i === normalized.length - 1;
-          if (!isLast && batchCount >= effectiveBatchSize) {
-            expanded.push("TRAY");
-            batchCount = 0;
-          }
-        }
-
-        // Always end at home for pickup.
-        expanded.push("TRAY");
-
-        sentCommands = expanded;
-
-        const batch = await stm32DispenseMany(cfg, expanded, {
-          commandPrefix: "",
-          okPattern: /Turning off motors|^200$|Closing door|Waiting 5s for pickup/i,
-          errorPattern: /^(500|501)$|No detection|Sensor already/i,
-          delayBetweenCommandsMs,
-        });
-
-        for (const { productCode, result: res } of batch) {
-          results.push({
-            productCode,
-            ok: Boolean(res.okLine) && !res.errorLine,
-            okLine: res.okLine,
-            errorLine: res.errorLine,
-            rawLines: res.rawLines,
-          });
-        }
-      } else if (finalizeMode === "row") {
-        // Group products by row (first digit of slot ID), dispense all from one row, TRAY, then next row
-        // Preserve original order within each row
-        const motorNums = normalized.map((c, idx) => ({
-          code: c,
-          motor: getRqMotorNumber(c),
-          originalIndex: idx,
-        }));
-
-        // Group by row, preserving original order
-        const rowGroups = new Map<number, Array<{ code: string; originalIndex: number }>>();
-        for (const { code, motor, originalIndex } of motorNums) {
-          const row = motor !== undefined ? getMotorRow(motor) : 0;
-          if (!rowGroups.has(row)) rowGroups.set(row, []);
-          rowGroups.get(row)!.push({ code, originalIndex });
-        }
-
-        // Sort rows by the minimum original index in each row (preserves order of first appearance)
-        const sortedRows = Array.from(rowGroups.keys()).sort((a, b) => {
-          const minA = Math.min(...(rowGroups.get(a)?.map((x) => x.originalIndex) || [0]));
-          const minB = Math.min(...(rowGroups.get(b)?.map((x) => x.originalIndex) || [0]));
-          return minA - minB;
-        });
-
-        const expanded: string[] = [];
-        for (const row of sortedRows) {
-          const items = rowGroups.get(row) || [];
-          // Sort items within row by original index
-          items.sort((a, b) => a.originalIndex - b.originalIndex);
-          for (const { code } of items) {
-            const trimmed = code.trim();
-            const isRq = /^RQ\s*\d+$/i.test(trimmed);
-            const isNumeric = /^\d+$/.test(trimmed);
-            expanded.push(isRq ? trimmed : isNumeric ? `RQ${trimmed}` : trimmed);
-          }
-          // TRAY after each row
-          expanded.push("TRAY");
-        }
-
-        sentCommands = expanded;
-        console.log("[STM32 Dispense] Row mode expanded commands:", expanded);
-
-        const batch = await stm32DispenseMany(cfg, expanded, {
-          commandPrefix: "",
-          okPattern: /Turning off motors|^200$|Closing door|Waiting 5s for pickup/i,
-          errorPattern: /^(500|501)$|No detection|Sensor already/i,
-          delayBetweenCommandsMs,
-        });
-
-        for (const { productCode, result: res } of batch) {
-          results.push({
-            productCode,
-            ok: Boolean(res.okLine) && !res.errorLine,
-            okLine: res.okLine,
-            errorLine: res.errorLine,
-            rawLines: res.rawLines,
-          });
-        }
-      } else if (finalizeMode === "each") {
-        const expanded: string[] = [];
-        for (const c of normalized) {
-          const trimmed = c.trim();
-          const isRq = /^RQ\s*\d+$/i.test(trimmed);
-          const isNumeric = /^\d+$/.test(trimmed);
-          expanded.push(isRq ? trimmed : isNumeric ? `RQ${trimmed}` : trimmed);
-          expanded.push("TRAY");
-        }
-
-        sentCommands = expanded;
-
-        const batch = await stm32DispenseMany(cfg, expanded, {
-          commandPrefix: "",
-          okPattern: /Turning off motors|^200$|Closing door|Waiting 5s for pickup/i,
-          errorPattern: /^(500|501)$|No detection|Sensor already/i,
-          delayBetweenCommandsMs,
-        });
-
-        for (const { productCode, result: res } of batch) {
-          results.push({
-            productCode,
-            ok: Boolean(res.okLine) && !res.errorLine,
-            okLine: res.okLine,
-            errorLine: res.errorLine,
-            rawLines: res.rawLines,
-          });
-        }
-      } else {
-        sentCommands = [...normalized, "TRAY"];
-        const batch = await stm32DispenseMany(cfg, normalized, {
-          finalizeCommand: "TRAY",
-          okPattern: rqOkPattern,
-          errorPattern: rqErrorPattern,
-          finalizeOkPattern: trayOkPattern,
-          finalizeErrorPattern: trayErrorPattern,
-          delayBetweenCommandsMs,
-          delayBeforeFinalizeMs,
-        });
-        for (const { productCode, result: res } of batch) {
-          results.push({
-            productCode,
-            ok: Boolean(res.okLine) && !res.errorLine,
-            okLine: res.okLine,
-            errorLine: res.errorLine,
-            rawLines: res.rawLines,
-          });
-        }
-      }
     }
 
     const success = results.every((r) => r.ok);

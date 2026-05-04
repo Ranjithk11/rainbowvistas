@@ -41,8 +41,10 @@ export function getStm32Config(): Stm32Config {
     throw new Error("Invalid env STM32_BAUDRATE");
   }
 
-  // Default to 60 seconds timeout (dispense sequence takes time: homing, moving, dispensing, door)
-  const timeoutMs = timeoutRaw ? Number(timeoutRaw) : 60000;
+  // Default to 90 seconds timeout. An RQ sequence does: homeAxes -> travel -> motor spin
+  // (~8s) -> delay 1s -> travel to door -> doorOpen -> Serial.println(200). That's typically
+  // 30-45s of mechanical motion before the "200" response arrives, so we want headroom.
+  const timeoutMs = timeoutRaw ? Number(timeoutRaw) : 90000;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new Error("Invalid env STM32_TIMEOUT_MS");
   }
@@ -88,13 +90,15 @@ export async function stm32Dispense(
 
   const commandPrefix = opts?.commandPrefix ?? "RQ";
   const commandSuffix = opts?.commandSuffix ?? "\r\n";
-  // Match Flask's success patterns: "Request sequence finished" or "200" or "Response 200"
-  const okPattern =
-    opts?.okPattern ??
-    /Product drop detected|Product detected|Request sequence finished|^200$|Response 200/i;
-  const errorPattern = opts?.errorPattern ?? /^ERROR\b/i;
+  // STM32 firmware (sketch_may25.ino) has debugPrinting=false, so the ONLY real serial
+  // output from an RQ sequence is literally "200". All other text lines are legacy.
+  const okPattern = opts?.okPattern ?? /^200$/;
+  const errorPattern = opts?.errorPattern ?? /^(500|501)$|^ERROR\b/i;
 
-  const effectiveCode = code.toUpperCase().startsWith(commandPrefix.toUpperCase()) ? code : `${commandPrefix}${code}`;
+  const effectiveCode =
+    commandPrefix.length > 0 && code.toUpperCase().startsWith(commandPrefix.toUpperCase())
+      ? code
+      : `${commandPrefix}${code}`;
   const command = `${effectiveCode}${commandSuffix}`;
 
   // Dynamic import to avoid webpack bundling issues
@@ -204,10 +208,9 @@ export async function stm32DispenseMany(
 
   const commandPrefix = opts?.commandPrefix ?? "RQ";
   const commandSuffix = opts?.commandSuffix ?? "\r\n";
-  const okPattern =
-    opts?.okPattern ??
-    /Product drop detected|Product detected|Request sequence finished|^200$|Response 200/i;
-  const errorPattern = opts?.errorPattern ?? /^ERROR\b/i;
+  // See note in stm32Dispense: firmware only emits "200" per RQ sequence.
+  const okPattern = opts?.okPattern ?? /^200$/;
+  const errorPattern = opts?.errorPattern ?? /^(500|501)$|^ERROR\b/i;
 
   const finalizeCommandRaw = typeof opts?.finalizeCommand === "string" ? opts?.finalizeCommand.trim() : "";
   const finalizeCommand = finalizeCommandRaw.length > 0 ? finalizeCommandRaw : undefined;

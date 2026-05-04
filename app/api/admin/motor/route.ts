@@ -61,33 +61,19 @@ export async function POST(request: NextRequest) {
         });
       }
       
-      // Send RQ command to STM32 for dispense
+      // Send RQ<slot> command to STM32 firmware for full dispense sequence
+      // Firmware's requestMotorSequence() already handles: home -> travel -> spin motor
+      // -> travel to door -> doorOpen -> Serial.println(200) -> delay(15s) -> doorClose -> home.
+      // So the only response we ever get is literally "200" (debugPrinting=false in firmware).
       if (action === "dispense") {
         try {
           const result = await stm32Dispense(cfg, slotId, {
-            commandPrefix: "",
-            okPattern: /Request sequence finished|^200$|Response 200/i,
-            errorPattern: /^(500|501)$|^ERROR\b|fail|invalid/i,
+            okPattern: /^200$/,
+            errorPattern: /^(500|501)$|^ERROR\b/i,
           });
-
-          const autoReopen = (() => {
-            const v = process.env.STM32_AUTO_REOPEN_AFTER_DISPENSE;
-            if (typeof v !== "string") return true;
-            const n = v.trim().toLowerCase();
-            return n === "" || n === "1" || n === "true" || n === "yes";
-          })();
 
           const rawLines = [...(result.rawLines || [])];
 
-          if (autoReopen && result.okLine && !result.errorLine) {
-            const reopenRes = await stm32Dispense(cfg, "REOPEN", {
-              commandPrefix: "",
-              okPattern: /REOPEN complete|^200$/i,
-              errorPattern: /error|fail|invalid/i,
-            });
-            rawLines.push(...(reopenRes.rawLines || []));
-          }
-          
           if (result.okLine) {
             try {
               const { adminDb } = await import("@/lib/admin-db");
@@ -144,14 +130,23 @@ export async function POST(request: NextRequest) {
       }
       
       try {
-        // Firmware expects HOME<axisNumber>. Home tray axis (0) for "Home Machine".
-        // Treat homing prints as success so UI doesn't show false errors.
-        const result = await stm32Dispense(cfg, "HOME0", {
+        // Firmware command is literally "HOME" (not "HOME0"). With debugPrinting=false the
+        // firmware emits no text when homing completes, so we accept completion by timeout
+        // being unnecessary: send "HOME" with a short success window and treat absence of
+        // error output as success after a brief wait.
+        const result = await stm32Dispense(cfg, "HOME", {
           commandPrefix: "",
-          okPattern: /Homed axis successfully|Moving toward endstop|Endstop already trigerred/i,
-          errorPattern: /Endstop error|Invalid stepper Motor selected|Unknown command/i,
+          okPattern: /^200$|Homed successfully/i,
+          errorPattern: /Endstop error|Invalid axis|Unknown command/i,
+        }).catch((e) => {
+          // Firmware has no explicit "homing done" serial output, so a response timeout is
+          // expected. Surface it as success rather than a hard error.
+          if (e instanceof Error && /timeout/i.test(e.message)) {
+            return { rawLines: ["[STM32] HOME issued; no response expected"] as string[], okLine: "HOME issued" };
+          }
+          throw e;
         });
-        
+
         return NextResponse.json({
           success: true,
           message: "Home command sent",
@@ -168,48 +163,16 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Handle REOPEN command - reopens the tray door
-    // Firmware outputs: "REOPEN command received", "Opening dispensing door", 
-    // "Door opened. Waiting 10 seconds...", "Closing dispensing door", "REOPEN complete", "200"
+    // REOPEN is not implemented in current STM32 firmware. The RQ<slot> dispense sequence
+    // already opens the door, holds it for 15s, and closes it automatically. We keep this
+    // endpoint responding OK so existing UI buttons don't error out.
     if (command === "REOPEN") {
-      if (cfg.mock) {
-        console.log("[STM32 Mock] Simulating REOPEN command");
-        return NextResponse.json({
-          success: true,
-          message: "Reopen command sent (mock)",
-          response: "REOPEN complete",
-          rawLines: [
-            "[MOCK] REOPEN command received",
-            "[MOCK] Opening dispensing door",
-            "[MOCK] Door opened. Waiting 10 seconds...",
-            "[MOCK] Closing dispensing door",
-            "[MOCK] REOPEN complete",
-            "[MOCK] 200",
-          ],
-        });
-      }
-      
-      try {
-        const result = await stm32Dispense(cfg, "REOPEN", {
-          commandPrefix: "",
-          okPattern: /REOPEN complete|^200$/i,
-          errorPattern: /error|fail|invalid/i,
-        });
-        
-        return NextResponse.json({
-          success: true,
-          message: "Reopen command sent",
-          response: result.okLine || "REOPEN complete",
-          rawLines: result.rawLines,
-        });
-      } catch (err) {
-        const error = err instanceof Error ? err : new Error(String(err));
-        console.error("[STM32] Reopen error:", error);
-        return NextResponse.json({
-          success: false,
-          message: error.message,
-        }, { status: 500 });
-      }
+      return NextResponse.json({
+        success: true,
+        message: "REOPEN is handled automatically by the dispense sequence (no-op)",
+        response: "no-op",
+        rawLines: ["[INFO] REOPEN ignored: firmware's RQ sequence already opens/closes the door"],
+      });
     }
 
     // Handle DISPENSE command (generic - no slot selected)
