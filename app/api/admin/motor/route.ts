@@ -130,23 +130,17 @@ export async function POST(request: NextRequest) {
       }
       
       try {
-        // Firmware has no serial response for HOME or DISPENSE (debugPrinting=false).
-        // We queue both commands back-to-back on a single port open. The firmware's
-        // main loop() reads commands one at a time from its serial buffer, so:
-        //   1. `HOME`     -> homeAxes() (X, Z, D home to endstops)
-        //   2. `DISPENSE` -> moveStepperTo(Z, doorZ) -> moveStepperTo(X, doorX) -> doorOpen()
-        // Net effect: machine homes, then the tray travels to the dispense door position
-        // and the door opens so the operator can load/pick up products.
-        const { sent } = await stm32SendCommands(cfg, ["HOME", "DISPENSE"], {
-          delayBetweenCommandsMs: 300,
-        });
+        // Firmware's HOME command homes X, Z, D to their endstops and leaves the tray
+        // parked at (0, 0). No serial response is emitted (debugPrinting=false), so we
+        // fire-and-forget and return immediately.
+        const { sent } = await stm32SendCommands(cfg, ["HOME"]);
 
         return NextResponse.json({
           success: true,
-          message: "Home + move to dispense position issued",
-          response: "HOME then DISPENSE queued",
+          message: "Home command issued",
+          response: "HOME queued",
           rawLines: [
-            `[STM32] Sent: ${sent.join(" -> ")}`,
+            `[STM32] Sent: ${sent.join(", ")}`,
             "[STM32] No serial response expected (firmware debugPrinting=false)",
           ],
         });
@@ -172,19 +166,39 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Handle DISPENSE command (generic - no slot selected)
+    // Handle generic DISPENSE command (no slot selected).
+    // Firmware's `DISPENSE` command moves Z -> doorZ, X -> doorX, then doorOpen().
+    // Use this to park the tray at the dispense door (e.g. for loading / maintenance).
     if (command === "DISPENSE") {
-      // In mock mode, return helpful message
       if (cfg.mock) {
+        console.log("[STM32 Mock] Simulating DISPENSE (park at door)");
+        return NextResponse.json({
+          success: true,
+          message: "Dispense position command sent (mock)",
+          response: "Moving to dispense door",
+          rawLines: ["[MOCK] DISPENSE", "[MOCK] Tray at door, door open"],
+        });
+      }
+
+      try {
+        const { sent } = await stm32SendCommands(cfg, ["DISPENSE"]);
+        return NextResponse.json({
+          success: true,
+          message: "Tray moving to dispense door",
+          response: "DISPENSE queued",
+          rawLines: [
+            `[STM32] Sent: ${sent.join(", ")}`,
+            "[STM32] No serial response expected (firmware debugPrinting=false)",
+          ],
+        });
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        console.error("[STM32] Dispense (park) error:", error);
         return NextResponse.json({
           success: false,
-          message: "Please select a slot first before dispensing",
-        }, { status: 400 });
+          message: error.message,
+        }, { status: 500 });
       }
-      return NextResponse.json({
-        success: false,
-        message: "Please select a slot first before dispensing",
-      }, { status: 400 });
     }
 
     return NextResponse.json({
