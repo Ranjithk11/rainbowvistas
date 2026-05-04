@@ -25,6 +25,19 @@ if (!fs.existsSync(dbPath)) {
 
 const db = new Database(dbPath);
 
+// Add discount_value column if it doesn't exist
+try {
+  const columns = db.prepare('PRAGMA table_info(vending_slots)').all();
+  const hasDiscountValue = columns.some((c) => c.name === 'discount_value');
+  if (!hasDiscountValue) {
+    console.log('Adding discount_value column to vending_slots table...');
+    db.exec('ALTER TABLE vending_slots ADD COLUMN discount_value REAL DEFAULT 0');
+    console.log('✓ discount_value column added');
+  }
+} catch (e) {
+  console.error('Error adding discount_value column:', e.message);
+}
+
 // External API for product discounts
 const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 const DB_TOKEN = process.env.NEXT_PUBLIC_DB_TOKEN;
