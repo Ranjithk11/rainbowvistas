@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { stm32Dispense, getStm32Config } from "@/utils/stm32";
+import { stm32Dispense, stm32SendCommands, getStm32Config } from "@/utils/stm32";
 
 // POST motor control command
 // Connects to real STM32 hardware via serial port
@@ -130,28 +130,25 @@ export async function POST(request: NextRequest) {
       }
       
       try {
-        // Firmware command is literally "HOME" (not "HOME0"). With debugPrinting=false the
-        // firmware emits no text when homing completes, so we accept completion by timeout
-        // being unnecessary: send "HOME" with a short success window and treat absence of
-        // error output as success after a brief wait.
-        const result = await stm32Dispense(cfg, "HOME", {
-          commandPrefix: "",
-          okPattern: /^200$|Homed successfully/i,
-          errorPattern: /Endstop error|Invalid axis|Unknown command/i,
-        }).catch((e) => {
-          // Firmware has no explicit "homing done" serial output, so a response timeout is
-          // expected. Surface it as success rather than a hard error.
-          if (e instanceof Error && /timeout/i.test(e.message)) {
-            return { rawLines: ["[STM32] HOME issued; no response expected"] as string[], okLine: "HOME issued" };
-          }
-          throw e;
+        // Firmware has no serial response for HOME or DISPENSE (debugPrinting=false).
+        // We queue both commands back-to-back on a single port open. The firmware's
+        // main loop() reads commands one at a time from its serial buffer, so:
+        //   1. `HOME`     -> homeAxes() (X, Z, D home to endstops)
+        //   2. `DISPENSE` -> moveStepperTo(Z, doorZ) -> moveStepperTo(X, doorX) -> doorOpen()
+        // Net effect: machine homes, then the tray travels to the dispense door position
+        // and the door opens so the operator can load/pick up products.
+        const { sent } = await stm32SendCommands(cfg, ["HOME", "DISPENSE"], {
+          delayBetweenCommandsMs: 300,
         });
 
         return NextResponse.json({
           success: true,
-          message: "Home command sent",
-          response: result.okLine || "Homing initiated",
-          rawLines: result.rawLines,
+          message: "Home + move to dispense position issued",
+          response: "HOME then DISPENSE queued",
+          rawLines: [
+            `[STM32] Sent: ${sent.join(" -> ")}`,
+            "[STM32] No serial response expected (firmware debugPrinting=false)",
+          ],
         });
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));

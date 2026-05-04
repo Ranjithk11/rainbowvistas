@@ -174,6 +174,67 @@ export async function stm32Dispense(
   }
 }
 
+/**
+ * Fire-and-forget serial writer. Opens the port, writes each command in order with an
+ * optional inter-command delay, then closes. Does NOT wait for any response.
+ *
+ * Use this for firmware commands that produce no serial output (HOME, DISPENSE, M,...)
+ * because `debugPrinting=false` in the current STM32 firmware.
+ */
+export async function stm32SendCommands(
+  cfg: Stm32Config,
+  commands: string[],
+  opts?: { commandSuffix?: string; delayBetweenCommandsMs?: number }
+): Promise<{ sent: string[] }> {
+  const clean = (Array.isArray(commands) ? commands : [])
+    .map((c) => (typeof c === "string" ? c.trim() : ""))
+    .filter((c) => c.length > 0);
+
+  if (clean.length === 0) {
+    throw new Error("No commands to send");
+  }
+
+  if (cfg.mock) {
+    console.log("[STM32 Mock] send commands:", clean);
+    return { sent: clean };
+  }
+
+  const suffix = opts?.commandSuffix ?? "\r\n";
+  const delayMs =
+    typeof opts?.delayBetweenCommandsMs === "number" && opts.delayBetweenCommandsMs > 0
+      ? Math.floor(opts.delayBetweenCommandsMs)
+      : 150;
+
+  const { SerialPort } = await import("serialport");
+
+  const port = new SerialPort({ path: cfg.port, baudRate: cfg.baudRate, autoOpen: false });
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      port.open((err) => (err ? reject(err) : resolve()));
+    });
+
+    for (const cmd of clean) {
+      await new Promise<void>((resolve, reject) => {
+        port.write(`${cmd}${suffix}`, (err) => {
+          if (err) return reject(err);
+          port.drain((dErr) => (dErr ? reject(dErr) : resolve()));
+        });
+      });
+      if (delayMs > 0) {
+        await new Promise<void>((r) => setTimeout(r, delayMs));
+      }
+    }
+
+    return { sent: clean };
+  } finally {
+    await new Promise<void>((resolve) => {
+      if (!port.isOpen) return resolve();
+      port.close(() => resolve());
+    });
+  }
+}
+
 export async function stm32DispenseMany(
   cfg: Stm32Config,
   productCodes: string[],
