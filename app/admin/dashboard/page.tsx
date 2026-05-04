@@ -323,13 +323,14 @@ export default function AdminDashboardPage() {
     try {
       // Find the product in admin products first
       let product = productsData?.find((p: Product) => p.id.toString() === productId);
-      
+
       // If not found, search in browse products (allCategoryProducts)
       let productName = product?.name;
       let category = product?.category;
       let retailPrice = product?.retail_price;
       let imageUrl = product?.image_url;
-      
+      let discountValue = product?.discount ? (product.discount as any).value || product.discount : undefined;
+
       if (!product) {
         const browseProduct = allCategoryProducts.find((p: any) => (p._id || p.id) === productId);
         if (browseProduct) {
@@ -337,17 +338,23 @@ export default function AdminDashboardPage() {
           category = browseProduct.productCategory?.title || browseProduct.category || "Uncategorized";
           retailPrice = browseProduct.retailPrice || browseProduct.retail_price || 0;
           imageUrl = browseProduct.images?.[0]?.url || browseProduct.image_url || "";
+          // Extract discount from browse product
+          const rawDiscount = browseProduct.discount;
+          if (rawDiscount) {
+            discountValue = typeof rawDiscount === 'object' ? (rawDiscount.value || rawDiscount.percentage || rawDiscount.amount) : rawDiscount;
+          }
         }
       }
-      
-      await assignProduct({ 
-        slotId: slotNumber, 
-        productId: productId, 
+
+      await assignProduct({
+        slotId: slotNumber,
+        productId: productId,
         quantity,
         productName: productName,
         category: category,
         retailPrice: retailPrice,
         imageUrl: imageUrl,
+        discountValue: discountValue,
       });
       refetchSlots();
       refetchProducts();

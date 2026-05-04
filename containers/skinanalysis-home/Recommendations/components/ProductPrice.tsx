@@ -12,10 +12,14 @@ interface ProductPriceProps {
 }
 
 const calculateDiscount = (originalPrice?: number, discountPercentage?: number) => {
-  if (!Number.isFinite(originalPrice as number)) return undefined;
-  if (!Number.isFinite(discountPercentage as number)) return originalPrice;
+  // Explicitly convert to numbers to handle string inputs
+  const price = Number(originalPrice ?? 0);
+  const discount = Number(discountPercentage ?? 0);
+
+  if (!Number.isFinite(price)) return undefined;
+  if (!Number.isFinite(discount)) return price;
   // discountPercentage is a percentage (e.g., 10 for 10%)
-  const discountedPrice = (originalPrice as number) - (originalPrice as number) * ((discountPercentage as number) / 100);
+  const discountedPrice = price - (price * (discount / 100));
   return Number(discountedPrice.toFixed(0));
 };
 

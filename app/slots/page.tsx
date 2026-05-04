@@ -20,6 +20,7 @@ type VendingSlot = {
   category?: string;
   retail_price?: number;
   image_url?: string;
+  discount_value?: number;
 };
 
 const normalizeProductId = (id: unknown) => {
@@ -39,6 +40,7 @@ export default function SlotsPage() {
   const [productsMap, setProductsMap] = useState<Record<string, any>>({});
   const [selectedSlotId, setSelectedSlotId] = useState<number | null>(null);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
+  const [hasBackfilled, setHasBackfilled] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -158,6 +160,7 @@ export default function SlotsPage() {
             category: slot.category,
             retail_price: slot.retail_price !== undefined ? Number(slot.retail_price) : undefined,
             image_url: slot.image_url ? String(slot.image_url) : undefined,
+            discount_value: slot.discount_value !== undefined ? Number(slot.discount_value) : undefined,
           };
         });
 
@@ -173,7 +176,119 @@ export default function SlotsPage() {
     };
   }, []);
 
+  // Backfill logic: update slots missing discount_value from products map
+  // Only runs once per page load to prevent infinite loops
+  useEffect(() => {
+    if (hasBackfilled) return;
+
+    let cancelled = false;
+
+    const run = async () => {
+      if (Object.keys(productsMap).length === 0) return;
+
+      const slotsNeedingDiscount: Record<number, { slot: VendingSlot; discount: number }> = {};
+
+      Object.entries(slotsData).forEach(([slotIdStr, slot]) => {
+        const slotId = Number(slotIdStr);
+        if (!slot?.product_id) return;
+
+        // Skip if slot already has discount_value
+        if (slot.discount_value !== undefined && slot.discount_value !== null && slot.discount_value !== 0) return;
+
+        const rawSlotProductId = String(slot.product_id);
+        const nId = normalizeProductId(rawSlotProductId);
+        const product = productsMap[nId] || productsMap[rawSlotProductId] || productsMap[normalizeProductId(rawSlotProductId)];
+
+        if (!product) return;
+
+        // Extract discount from product data (handle multiple shapes)
+        const rawDiscount = product?.discount;
+        const productDiscount = (() => {
+          if (typeof rawDiscount === "number" && Number.isFinite(rawDiscount)) return rawDiscount;
+          if (rawDiscount && typeof rawDiscount === "object") {
+            const v = (rawDiscount as any).value ?? (rawDiscount as any).percentage ?? (rawDiscount as any).amount;
+            const n = Number(v);
+            return Number.isFinite(n) ? n : 0;
+          }
+          return 0;
+        })();
+
+        if (productDiscount > 0) {
+          slotsNeedingDiscount[slotId] = { slot, discount: productDiscount };
+        }
+      });
+
+      if (Object.keys(slotsNeedingDiscount).length === 0) {
+        if (!cancelled) setHasBackfilled(true);
+        return;
+      }
+
+      // Update slots with missing discount_value
+      for (const [slotId, { slot, discount }] of Object.entries(slotsNeedingDiscount)) {
+        if (cancelled) break;
+
+        try {
+          await fetch("/api/admin/slots", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              slot_id: Number(slotId),
+              product_id: slot.product_id,
+              quantity: slot.quantity,
+              product_name: slot.product_name,
+              category: slot.category,
+              retail_price: slot.retail_price,
+              image_url: slot.image_url,
+              discount_value: discount,
+            }),
+          });
+        } catch (e) {
+          console.warn(`[Slots] Failed to backfill discount for slot ${slotId}:`, e);
+        }
+      }
+
+      // Refresh slots data after backfill
+      if (!cancelled) {
+        try {
+          const res = await fetch("/api/admin/slots", {
+            method: "GET",
+            headers: { "Content-Type": "application/json" },
+            cache: "no-store",
+          });
+          if (res.ok) {
+            const json = await res.json();
+            const obj = (json && typeof json === "object") ? json : {};
+            const next: Record<number, VendingSlot> = {};
+            Object.values(obj as any).forEach((slot: any) => {
+              if (!slot?.slot_id) return;
+              next[Number(slot.slot_id)] = {
+                slot_id: Number(slot.slot_id),
+                product_id: slot.product_id ? String(slot.product_id) : undefined,
+                quantity: Number(slot.quantity ?? 0),
+                product_name: slot.product_name,
+                category: slot.category,
+                retail_price: slot.retail_price !== undefined ? Number(slot.retail_price) : undefined,
+                image_url: slot.image_url ? String(slot.image_url) : undefined,
+                discount_value: slot.discount_value !== undefined ? Number(slot.discount_value) : undefined,
+              };
+            });
+            setSlotsData(next);
+          }
+        } catch (e) {
+          console.warn("[Slots] Failed to refresh slots after discount backfill:", e);
+        }
+        setHasBackfilled(true);
+      }
+    };
+
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [slotsData, productsMap, hasBackfilled]);
+
   // Fetch products for mapping slot -> product image/discount/price
+  // Removed hasBrand and isShopifyAvailable filters to retrieve all products with discount data
   useEffect(() => {
     let cancelled = false;
 
@@ -300,23 +415,45 @@ export default function SlotsPage() {
       "";
     const imageUrl = typeof imageUrlRaw === "string" ? imageUrlRaw : "";
     const retailPrice = product?.retail_price ?? slot.retail_price;
-    
-    // Get discount from product data
-    const productDiscount = product?.discount?.value || 0;
-    
-    const priceText = `INR.${Number(retailPrice ?? 0)}/-`;
+
+    // Get discount from slot.discount_value (database) first, then fallback to product.discount
+    const slotDiscount = slot.discount_value !== undefined ? Number(slot.discount_value) : 0;
+    const rawDiscount = product?.discount;
+    const productDiscount = (() => {
+      if (typeof rawDiscount === "number" && Number.isFinite(rawDiscount)) return rawDiscount;
+      if (rawDiscount && typeof rawDiscount === "object") {
+        const v = (rawDiscount as any).value ?? (rawDiscount as any).percentage ?? (rawDiscount as any).amount;
+        const n = Number(v);
+        return Number.isFinite(n) ? n : 0;
+      }
+      return 0;
+    })();
+
+    // Prioritize slot discount (from database) over product discount (from external API)
+    const finalDiscount = slotDiscount > 0 ? slotDiscount : productDiscount;
+
+    // Log for debugging
+    if (selectedSlotId) {
+      console.log(`[Slots] Slot ${selectedSlotId} - slot discount: ${slotDiscount}, product discount: ${productDiscount}, final: ${finalDiscount}`);
+    }
+
+    // Calculate discounted priceText for cart
+    const discountedPrice = finalDiscount > 0
+      ? Number(retailPrice ?? 0) - (Number(retailPrice ?? 0) * (finalDiscount / 100))
+      : Number(retailPrice ?? 0);
+    const priceText = `INR.${Math.round(discountedPrice)}/-`;
 
     return {
       id: product?.id ? String(product.id) : slot.product_id,
       name,
       imageUrl,
       retailPrice: Number(retailPrice ?? 0),
-      discountValue: productDiscount,
+      discountValue: finalDiscount,
       priceText,
       slotId: selectedSlotId,
       quantityAvailable: slot.quantity,
     };
-  }, [selectedSlotId, slotsData, productsMap, discount]);
+  }, [selectedSlotId, slotsData, productsMap]);
 
   const handleSelect = (slotId: number) => {
     const slot = slotsData[slotId];

@@ -631,9 +631,23 @@
                                                     >
                                                         {capitalizeWords(item.name)}
                                                     </Typography>
-                                                    <Typography sx={{ mt: 0.5, fontWeight: 800, fontSize: 24, color: "#b91c1c" }}>
-                                                        {item.priceText || ""}
-                                                    </Typography>
+                                                    {item.discountValue && item.discountValue > 0 && item.originalPrice ? (
+                                                        <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}>
+                                                            <Typography sx={{ fontWeight: 800, fontSize: 16, color: "#6b7280", textDecoration: "line-through" }}>
+                                                                INR.{item.originalPrice}/-
+                                                            </Typography>
+                                                            <Typography sx={{ fontWeight: 800, fontSize: 24, color: "#b91c1c" }}>
+                                                                {item.priceText || ""}
+                                                            </Typography>
+                                                            <Typography sx={{ fontSize: 16, color: "text.secondary" }}>
+                                                                Discount: {item.discountValue}% off
+                                                            </Typography>
+                                                        </Box>
+                                                    ) : (
+                                                        <Typography sx={{ mt: 0.5, fontWeight: 800, fontSize: 24, color: "#b91c1c" }}>
+                                                            {item.priceText || ""}
+                                                        </Typography>
+                                                    )}
 
                                                     <Box sx={{ display: "flex", alignItems: "center", gap: 1, mt: 1, flexWrap: "wrap" }}>
                                                         <Box
