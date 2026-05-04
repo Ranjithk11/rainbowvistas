@@ -253,21 +253,17 @@ export default function AdminDashboardPage() {
   };
 
   const handleDispenseClick = async () => {
-    // Check if a slot is selected first
-    if (!selectedSlot) {
-      alert("Please select a slot first before dispensing");
-      return;
-    }
-    
     setDispenseModalOpen(true);
     setDispenseLoading(true);
     setDispenseStatus(null);
-    
+
     try {
-      const command = `M,${selectedSlot},1`;
+      // If a slot is selected: full RQ dispense cycle for that slot.
+      // Otherwise: park the tray at the dispense door (firmware's bare `DISPENSE`).
+      const command = selectedSlot ? `M,${selectedSlot},1` : "DISPENSE";
       const result = await motorControl({ command }).unwrap();
       setDispenseStatus(result.success);
-      if (result.success) {
+      if (result.success && selectedSlot) {
         refetchSlots();
       }
     } catch (error) {
