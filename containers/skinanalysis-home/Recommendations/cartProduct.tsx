@@ -15,10 +15,13 @@
     import { capitalizeWords } from "@/utils/func";
     import { useCart, CartItem } from "./CartContext";
     import UpiQrPayment from "@/components/payments/UpiQrPayment";
+    import { ProductPrice } from "./components";
     import { toast } from "react-toastify";
     import { useRouter } from "next/navigation";
     import { APP_ROUTES } from "@/utils/routes";
     import { useVoiceMessages } from "@/contexts/VoiceContext";
+    import { useSession } from "next-auth/react";
+    import PaymentReporter from "@/app/feedback/components/PaymentReporter";
 
     type CartProductProps = {
         open: boolean;
@@ -41,11 +44,20 @@
         const isMobile = useMediaQuery(theme.breakpoints.down("sm"));
         const { items, setQuantity, removeItem, clear } = useCart();
         const { speakMessage } = useVoiceMessages();
+        const { data: session } = useSession();
         const [showPriceDetails, setShowPriceDetails] = useState(false);
         const [step, setStep] = useState<"cart" | "checkout" | "payment">("cart");
         const [couponApplied, setCouponApplied] = useState(false);
         const [paymentMode, setPaymentMode] = useState<"test" | "live">("live");
         const [isDispensing, setIsDispensing] = useState(false);
+        const [paymentSuccess, setPaymentSuccess] = useState(false);
+        const [paymentPayload, setPaymentPayload] = useState<any>(null);
+
+        // Machine location from environment or default
+        const machineLocation =
+            process.env.NEXT_PUBLIC_MACHINE_LOCATION ||
+            (session?.user as any)?.machineLocation ||
+            "LeafWater Vending Machine";
 
         useEffect(() => {
             router.prefetch(APP_ROUTES.FEEDBACK);
@@ -356,6 +368,17 @@
                                             console.log("[Payment] onVerified called, items:", items, "payload:", payload);
                                             const itemsToDispense = [...items];
 
+                                            // Trigger payment webhook
+                                            setPaymentSuccess(true);
+                                            setPaymentPayload({
+                                                orderId: payload?.orderId,
+                                                paymentId: payload?.paymentId,
+                                                amount: payableTotal,
+                                                currency: "INR",
+                                                status: "paid",
+                                                method: paymentMode,
+                                            });
+
                                             if (typeof window !== "undefined") {
                                                 try {
                                                     window.sessionStorage.setItem(
@@ -366,6 +389,14 @@
                                                             discount,
                                                             payableTotal,
                                                             createdAt: Date.now(),
+                                                            payment: {
+                                                                orderId: payload?.orderId,
+                                                                paymentId: payload?.paymentId,
+                                                                amount: payableTotal,
+                                                                currency: "INR",
+                                                                status: "paid",
+                                                                method: paymentMode,
+                                                            },
                                                         })
                                                     );
                                                 } catch {
@@ -489,9 +520,13 @@
                                                             </Typography>
                                                         </Box>
 
-                                                        <Typography sx={{ fontWeight: 700, fontSize: 24, whiteSpace: "nowrap" }}>
-                                                            Rs.{Math.round(Number.isFinite(lineTotal) ? lineTotal : 0)}/-
-                                                        </Typography>
+                                                        <ProductPrice
+                                                            retailPrice={it.originalPrice}
+                                                            discountValue={it.discountValue}
+                                                            priceText={it.priceText || ""}
+                                                            productId={it.id}
+                                                            productName={it.name}
+                                                        />
                                                     </Box>
                                                 );
                                             })}
@@ -631,23 +666,15 @@
                                                     >
                                                         {capitalizeWords(item.name)}
                                                     </Typography>
-                                                    {item.discountValue && item.discountValue > 0 && item.originalPrice ? (
-                                                        <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}>
-                                                            <Typography sx={{ fontWeight: 800, fontSize: 16, color: "#6b7280", textDecoration: "line-through" }}>
-                                                                INR.{item.originalPrice}/-
-                                                            </Typography>
-                                                            <Typography sx={{ fontWeight: 800, fontSize: 24, color: "#b91c1c" }}>
-                                                                {item.priceText || ""}
-                                                            </Typography>
-                                                            <Typography sx={{ fontSize: 16, color: "text.secondary" }}>
-                                                                Discount: {item.discountValue}% off
-                                                            </Typography>
-                                                        </Box>
-                                                    ) : (
-                                                        <Typography sx={{ mt: 0.5, fontWeight: 800, fontSize: 24, color: "#b91c1c" }}>
-                                                            {item.priceText || ""}
-                                                        </Typography>
-                                                    )}
+                                                    <Box sx={{ mt: 0.5 }}>
+                                                        <ProductPrice
+                                                            retailPrice={item.originalPrice}
+                                                            discountValue={item.discountValue}
+                                                            priceText={item.priceText || ""}
+                                                            productId={item.id}
+                                                            productName={item.name}
+                                                        />
+                                                    </Box>
 
                                                     <Box sx={{ display: "flex", alignItems: "center", gap: 1, mt: 1, flexWrap: "wrap" }}>
                                                         <Box
@@ -802,6 +829,28 @@
 
                         {/* Bottom action buttons hidden - moved to top header */}
                     </Box>
+
+                    {/* Payment webhook reporter */}
+                    <PaymentReporter
+                        active={paymentSuccess}
+                        user={{
+                            userId: (session?.user as any)?.id,
+                            name: (session?.user as any)?.name,
+                            email: (session?.user as any)?.email,
+                            phone: (session?.user as any)?.mobileNumber || (session?.user as any)?.phoneNumber || (session?.user as any)?.phone,
+                        }}
+                        products={items.map((item) => ({
+                            id: item.id,
+                            name: item.name,
+                            quantity: item.quantity,
+                            slotId: item.slotId,
+                            retailPrice: parsePrice(item.priceText),
+                            amount: parsePrice(item.priceText) * (item.quantity || 0),
+                        }))}
+                        transaction={paymentPayload}
+                        selectedSlots={items.map((item) => item.slotId).filter((slot): slot is number => slot !== undefined).map(String)}
+                        machineLocation={machineLocation}
+                    />
                 </Dialog>
             </>
         );
