@@ -236,8 +236,12 @@ export default function AdminDashboardPage() {
     setHomingStatus(null);
     
     try {
-      const result = await motorControl({ command: "HOME" }).unwrap();
-      setHomingStatus(result.success);
+      // Send individual HOME commands for each axis to ensure homing works even if door is open
+      // Arduino's homeAxis() function is broken, so we send HOME_X, HOME_Z, HOME_D separately
+      await motorControl({ command: "HOME_X" }).unwrap();
+      await motorControl({ command: "HOME_Z" }).unwrap();
+      await motorControl({ command: "HOME_D" }).unwrap();
+      setHomingStatus(true);
     } catch (error) {
       console.error("Homing error:", error);
       setHomingStatus(false);
@@ -247,23 +251,15 @@ export default function AdminDashboardPage() {
   };
 
   const handleDispenseClick = async () => {
-    // Check if a slot is selected first
-    if (!selectedSlot) {
-      alert("Please select a slot first before dispensing");
-      return;
-    }
-    
     setDispenseModalOpen(true);
     setDispenseLoading(true);
     setDispenseStatus(null);
     
     try {
-      const command = `M,${selectedSlot},1`;
-      const result = await motorControl({ command }).unwrap();
+      // Send DISPENSE command to move tray to dispense door position and open door
+      // This doesn't require a slot selection - it moves to the door for loading/maintenance
+      const result = await motorControl({ command: "DISPENSE" }).unwrap();
       setDispenseStatus(result.success);
-      if (result.success) {
-        refetchSlots();
-      }
     } catch (error) {
       console.error("Dispense error:", error);
       setDispenseStatus(false);

@@ -154,6 +154,39 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // Handle individual HOME commands for each axis
+    if (command === "HOME_X" || command === "HOME_Z" || command === "HOME_D") {
+      if (cfg.mock) {
+        console.log(`[STM32 Mock] Simulating ${command}`);
+        return NextResponse.json({
+          success: true,
+          message: `${command} command sent (mock)`,
+          response: `${command} queued`,
+          rawLines: [`[MOCK] ${command}`, "[MOCK] Axis homed"],
+        });
+      }
+
+      try {
+        const { sent } = await stm32SendCommands(cfg, [command]);
+        return NextResponse.json({
+          success: true,
+          message: `${command} command issued`,
+          response: `${command} queued`,
+          rawLines: [
+            `[STM32] Sent: ${sent.join(", ")}`,
+            "[STM32] No serial response expected (firmware debugPrinting=false)",
+          ],
+        });
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        console.error(`[STM32] ${command} error:`, error);
+        return NextResponse.json({
+          success: false,
+          message: error.message,
+        }, { status: 500 });
+      }
+    }
+
     // REOPEN is not implemented in current STM32 firmware. The RQ<slot> dispense sequence
     // already opens the door, holds it for 15s, and closes it automatically. We keep this
     // endpoint responding OK so existing UI buttons don't error out.
