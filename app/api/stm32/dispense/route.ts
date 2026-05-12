@@ -158,11 +158,7 @@ export async function POST(req: Request) {
     sentCommands = [...expanded];
     console.log("[STM32 Dispense] Sending sequential RQ commands:", expanded);
 
-    // Override timeout to 40 seconds for dispense (door close has 10s timeout + 15s hold + homing)
-    // If no response within this time, we'll force home
-    const dispenseCfg = { ...cfg, timeoutMs: 40000 };
-
-    const batch = await stm32DispenseMany(dispenseCfg, expanded, {
+    const batch = await stm32DispenseMany(cfg, expanded, {
       commandPrefix: "",
       okPattern: rqOkPattern,
       errorPattern: rqErrorPattern,
