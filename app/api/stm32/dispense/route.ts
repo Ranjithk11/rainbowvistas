@@ -158,7 +158,11 @@ export async function POST(req: Request) {
     sentCommands = [...expanded];
     console.log("[STM32 Dispense] Sending sequential RQ commands:", expanded);
 
-    const batch = await stm32DispenseMany(cfg, expanded, {
+    // Override timeout to 40 seconds for dispense (door close has 10s timeout + 15s hold + homing)
+    // If no response within this time, we'll force home
+    const dispenseCfg = { ...cfg, timeoutMs: 40000 };
+
+    const batch = await stm32DispenseMany(dispenseCfg, expanded, {
       commandPrefix: "",
       okPattern: rqOkPattern,
       errorPattern: rqErrorPattern,
@@ -176,6 +180,21 @@ export async function POST(req: Request) {
     }
 
     const success = results.every((r) => r.ok);
+
+    // If dispense failed or timed out, send HOME commands to force tray home
+    // This handles the case where door close fails in the hardware
+    if (!success && !cfg.mock) {
+      console.log("[STM32] Dispense failed or timed out - forcing tray to home");
+      try {
+        const { stm32SendCommands } = await import("@/utils/stm32");
+        await stm32SendCommands(cfg, ["HOME_X", "HOME_Z", "HOME_D"], {
+          delayBetweenCommandsMs: 500,
+        });
+        console.log("[STM32] Forced HOME commands sent after dispense failure");
+      } catch (homeErr) {
+        console.warn("[STM32] Failed to send forced HOME commands:", homeErr);
+      }
+    }
 
     if (success && !IS_VERCEL) {
       try {
