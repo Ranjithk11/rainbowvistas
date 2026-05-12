@@ -177,6 +177,23 @@ export async function POST(req: Request) {
 
     const success = results.every((r) => r.ok);
 
+    // Send HOME commands after successful dispense to ensure tray returns to home position
+    // This is a workaround for the Arduino firmware's flawed homing logic in homeAxis()
+    if (success && !cfg.mock) {
+      try {
+        const { stm32SendCommands } = await import("@/utils/stm32");
+        console.log("[STM32] Sending HOME commands after successful dispense");
+        // Send HOME commands with delay between them to ensure proper execution
+        await stm32SendCommands(cfg, ["HOME_X", "HOME_Z", "HOME_D"], {
+          delayBetweenCommandsMs: 500,
+        });
+        console.log("[STM32] HOME commands sent successfully");
+      } catch (homeErr) {
+        console.warn("[STM32] Failed to send HOME commands after dispense:", homeErr);
+        // Don't fail the dispense if homing fails - the product was already dispensed
+      }
+    }
+
     if (success && !IS_VERCEL) {
       try {
         const { adminDb } = await import("@/lib/admin-db");
