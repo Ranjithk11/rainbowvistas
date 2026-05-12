@@ -215,12 +215,6 @@ export default function AdminDashboardPage() {
   const uniqueBrowseProducts = browseProducts.filter((p: any) => !adminProductIds.has(p.id));
   const transformedProducts = [...browseProducts, ...adminProducts.filter((p: any) => !browseProducts.some((bp: any) => bp.id === p.id))];
 
-  const transformedProductsById = new Map<string, (typeof transformedProducts)[number]>();
-  transformedProducts.forEach((p: any) => {
-    transformedProductsById.set(String(p.id), p);
-    transformedProductsById.set(String(p.id).replace(/^products\//, ""), p);
-  });
-
   const handleCartClick = () => {
     router.push("/products");
   };
@@ -253,17 +247,21 @@ export default function AdminDashboardPage() {
   };
 
   const handleDispenseClick = async () => {
+    // Check if a slot is selected first
+    if (!selectedSlot) {
+      alert("Please select a slot first before dispensing");
+      return;
+    }
+    
     setDispenseModalOpen(true);
     setDispenseLoading(true);
     setDispenseStatus(null);
-
+    
     try {
-      // If a slot is selected: full RQ dispense cycle for that slot.
-      // Otherwise: park the tray at the dispense door (firmware's bare `DISPENSE`).
-      const command = selectedSlot ? `M,${selectedSlot},1` : "DISPENSE";
+      const command = `M,${selectedSlot},1`;
       const result = await motorControl({ command }).unwrap();
       setDispenseStatus(result.success);
-      if (result.success && selectedSlot) {
+      if (result.success) {
         refetchSlots();
       }
     } catch (error) {
@@ -329,7 +327,7 @@ export default function AdminDashboardPage() {
       let category = product?.category;
       let retailPrice = product?.retail_price;
       let imageUrl = product?.image_url;
-      let discountValue = product?.discount ? (product.discount as any).value || product.discount : undefined;
+      let discountValue = product?.discount?.value;
 
       if (!product) {
         const browseProduct = allCategoryProducts.find((p: any) => (p._id || p.id) === productId);
@@ -339,9 +337,8 @@ export default function AdminDashboardPage() {
           retailPrice = browseProduct.retailPrice || browseProduct.retail_price || 0;
           imageUrl = browseProduct.images?.[0]?.url || browseProduct.image_url || "";
           // Extract discount from browse product
-          const rawDiscount = browseProduct.discount;
-          if (rawDiscount) {
-            discountValue = typeof rawDiscount === 'object' ? (rawDiscount.value || rawDiscount.percentage || rawDiscount.amount) : rawDiscount;
+          if (browseProduct.discount) {
+            discountValue = browseProduct.discount.value || browseProduct.discount.percentage || browseProduct.discount;
           }
         }
       }
@@ -495,22 +492,18 @@ export default function AdminDashboardPage() {
   };
 
   const handleProductEditClick = (productId: string) => {
-    const cleanId = String(productId).replace(/^products\//, "");
-    const mergedProduct = transformedProductsById.get(String(productId)) || transformedProductsById.get(cleanId);
-
-    if (!mergedProduct) {
-      setSnackbar({ open: true, message: "Product not found for editing.", severity: "error" });
-      return;
+    // Find the product to edit
+    const product = productsData?.find((p: Product) => p.id.toString() === productId);
+    if (product) {
+      setEditingProduct({
+        id: productId,
+        name: product.name,
+        category: product.category || "",
+        price: product.retail_price,
+        quantity: product.quantity,
+      });
+      setEditProductModalOpen(true);
     }
-
-    setEditingProduct({
-      id: String(mergedProduct.id),
-      name: mergedProduct.name,
-      category: mergedProduct.category || "",
-      price: mergedProduct.retail_price || 0,
-      quantity: mergedProduct.amount ?? 0,
-    });
-    setEditProductModalOpen(true);
   };
 
   const handleSaveProduct = async (data: {

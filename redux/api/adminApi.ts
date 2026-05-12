@@ -49,7 +49,7 @@ export interface AdminLoginResponse {
 
 export interface AssignProductRequest {
   slotId: number;
-  productId?: string | number | null;
+  productId: string;
   quantity?: number;
   productName?: string;
   category?: string;
