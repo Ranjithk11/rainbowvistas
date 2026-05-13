@@ -23,6 +23,7 @@ import { persistor } from "@/redux/store/store";
 import { useVoiceMessages } from "@/contexts/VoiceContext";
 import DispenseErrorReporter from "./components/DispenseErrorReporter";
 import DispenseReporter from "./components/DispenseReporter";
+import { getMachineLocation } from "@/utils/webhook";
 
 export default function FeedbackPage() {
   const theme = useTheme();
@@ -54,12 +55,12 @@ export default function FeedbackPage() {
   >({ status: "idle" });
   const [pickupTimer, setPickupTimer] = useState<number>(0);
 
-  // Machine location from environment or default
-  const machineLocation =
-    process.env.NEXT_PUBLIC_MACHINE_LOCATION ||
-    (session?.user as any)?.machineLocation ||
-    (checkoutSummary?.payment?.machineLocation) ||
-    "LeafWater Vending Machine";
+  // Machine location from database (Settings)
+  const [machineLocation, setMachineLocation] = useState<string>("");
+
+  useEffect(() => {
+    getMachineLocation().then(setMachineLocation);
+  }, []);
 
   const goHome = async () => {
     hasCompletedRef.current = true;

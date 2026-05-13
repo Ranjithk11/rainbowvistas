@@ -33,7 +33,7 @@ import LipsProductsView from "./Recommendations/LipProducts";
 import TopLogo from "./Recommendations/TopLogo";
 import { APP_ROUTES } from "@/utils/routes";
 import { useTheme } from "@mui/material/styles";
-import { sendScanCompletedWebhook } from "@/utils/webhook";
+import { sendScanCompletedWebhook, getMachineLocation } from "@/utils/webhook";
 
 const StyledViewAdminSkincareReport = styled(Container)(({ theme }) => ({
   minHeight: "100vh",
@@ -161,13 +161,15 @@ const ViewAdminSkincareReport = () => {
       // The webhook utility de-duplicates per userId per session so it only fires once.
       const user = data?.data?.user as any;
       if (user?._id) {
-        void sendScanCompletedWebhook({
-          name: user?.name,
-          email: user?.email,
-          phone: user?.mobileNumber || user?.phoneNumber || user?.phone,
-          userId: user?._id,
-          machineName: process.env.NEXT_PUBLIC_MACHINE_NAME || "Vending Machine",
-          machineLocation: process.env.NEXT_PUBLIC_MACHINE_LOCATION || "LeafWater Vending Machine",
+        getMachineLocation().then((machineLocation) => {
+          void sendScanCompletedWebhook({
+            name: user?.name,
+            email: user?.email,
+            phone: user?.mobileNumber || user?.phoneNumber || user?.phone,
+            userId: user?._id,
+            machineName: process.env.NEXT_PUBLIC_MACHINE_NAME || "Vending Machine",
+            machineLocation,
+          });
         });
       }
     }

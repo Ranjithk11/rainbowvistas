@@ -34,7 +34,7 @@ import { useAppSelector } from "@/redux/store/store";
 import Image from "next/image";
 import { ArrowBack } from "@mui/icons-material";
 import { useVoiceMessages, useVoice } from "@/contexts/VoiceContext";
-import { sendScanCompletedWebhook } from "@/utils/webhook";
+import { sendScanCompletedWebhook, getMachineLocation } from "@/utils/webhook";
 
 // Friendly progressive-message loader shown while AI analysis is in progress.
 const ANALYSIS_MESSAGES = [
@@ -790,15 +790,17 @@ const TakeSelfie = () => {
 
                   // Notify external automation (Make.com) about scan completion
                   const sessUser = session?.user as any;
-                  void sendScanCompletedWebhook({
-                    name: sessUser?.name as string,
-                    email: sessUser?.email as string,
-                    phone: (sessUser?.mobileNumber ||
-                      sessUser?.phoneNumber ||
-                      sessUser?.phone) as string,
-                    userId: resolvedUserId,
-                    machineName: process.env.NEXT_PUBLIC_MACHINE_NAME || "Vending Machine",
-                    machineLocation: process.env.NEXT_PUBLIC_MACHINE_LOCATION || "LeafWater Vending Machine",
+                  getMachineLocation().then((machineLocation) => {
+                    void sendScanCompletedWebhook({
+                      name: sessUser?.name as string,
+                      email: sessUser?.email as string,
+                      phone: (sessUser?.mobileNumber ||
+                        sessUser?.phoneNumber ||
+                        sessUser?.phone) as string,
+                      userId: resolvedUserId,
+                      machineName: process.env.NEXT_PUBLIC_MACHINE_NAME || "Vending Machine",
+                      machineLocation,
+                    });
                   });
                 }
               })

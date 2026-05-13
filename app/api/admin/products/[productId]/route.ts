@@ -68,13 +68,16 @@ export async function GET() {
 // Send webhook for slot updates
 async function sendSlotUpdateWebhook(slots: any[], affectedSlotId?: number) {
   try {
-    const { sendSlotUpdateWebhook } = await import("@/utils/webhook");
+    const { sendSlotUpdateWebhook, getMachineLocation } = await import("@/utils/webhook");
+
+    const machineLocation = await getMachineLocation();
 
     await sendSlotUpdateWebhook({
       slots: slots,
       updateType: 'slot_assignment',
       affectedSlotIds: affectedSlotId ? [affectedSlotId] : [],
       timestamp: new Date().toISOString(),
+      machineLocation,
     });
   } catch (error) {
     console.error("[sendSlotUpdateWebhook] Error:", error);

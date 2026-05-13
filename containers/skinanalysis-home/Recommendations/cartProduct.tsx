@@ -15,19 +15,20 @@
     import { capitalizeWords } from "@/utils/func";
     import { useCart, CartItem } from "./CartContext";
     import UpiQrPayment from "@/components/payments/UpiQrPayment";
-    import { ProductPrice } from "./components";
-    import { toast } from "react-toastify";
     import { useRouter } from "next/navigation";
-    import { APP_ROUTES } from "@/utils/routes";
     import { useVoiceMessages } from "@/contexts/VoiceContext";
     import { useSession } from "next-auth/react";
+    import { APP_ROUTES } from "@/utils/routes";
+    import { toast } from "react-toastify";
     import PaymentReporter from "@/app/feedback/components/PaymentReporter";
+    import { getMachineLocation } from "@/utils/webhook";
+    import ProductPrice from "./components/ProductPrice";
 
-    type CartProductProps = {
-        open: boolean;
-        onClose: () => void;
-        onCheckout?: () => void;
-    };
+type CartProductProps = {
+    open: boolean;
+    onClose: () => void;
+    onCheckout?: () => void;
+};
 
     const parsePrice = (priceText?: string): number => {
         if (!priceText) return 0;
@@ -53,11 +54,12 @@
         const [paymentSuccess, setPaymentSuccess] = useState(false);
         const [paymentPayload, setPaymentPayload] = useState<any>(null);
 
-        // Machine location from environment or default
-        const machineLocation =
-            process.env.NEXT_PUBLIC_MACHINE_LOCATION ||
-            (session?.user as any)?.machineLocation ||
-            "LeafWater Vending Machine";
+        // Machine location from database (Settings)
+        const [machineLocation, setMachineLocation] = useState<string>("");
+
+        useEffect(() => {
+            getMachineLocation().then(setMachineLocation);
+        }, []);
 
         useEffect(() => {
             router.prefetch(APP_ROUTES.FEEDBACK);

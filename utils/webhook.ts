@@ -6,6 +6,24 @@
 const DEFAULT_SCAN_COMPLETED_WEBHOOK_URL =
   "https://hook.eu1.make.com/2jsb7s7vin1sohcbdc0ttfv31p9mofhu";
 
+/**
+ * Fetch machine location from database (Settings)
+ * Falls back to environment variable if not set in database
+ */
+export async function getMachineLocation(): Promise<string> {
+  try {
+    const response = await fetch("/api/admin/machine-name");
+    const data = await response.json();
+    if (data.success && data.machineLocation) {
+      return data.machineLocation;
+    }
+  } catch (err) {
+    console.warn("[webhook] Failed to fetch machine location:", err);
+  }
+  // Fallback to environment variable
+  return process.env.NEXT_PUBLIC_MACHINE_LOCATION || process.env.LW_MACHINE_LOCATION || "LeafWater Vending Machine";
+}
+
 const DEFAULT_DISPENSE_ERROR_WEBHOOK_URL =
   "https://hook.eu1.make.com/lsphkpfoosnyvhvjew1a180q3oi6c645";
 
