@@ -179,7 +179,7 @@ export default function DashboardTitle({
           icon={
             <Image
               src="/wending/settings.svg"
-              alt="Settings"
+              alt="Settings"       
               width={40}
               height={40}
               style={{ objectFit: "contain" }}
