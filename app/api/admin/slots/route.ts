@@ -3,6 +3,45 @@ import { NextRequest, NextResponse } from "next/server";
 // Check if we're running on Vercel (serverless) or locally
 const IS_VERCEL = process.env.VERCEL === "1";
 
+// Flag to track if startup sync has been done
+let startupSyncDone = false;
+
+// Sync all slots to webhook on first server startup (for first-time deployment)
+async function performStartupSync() {
+  if (startupSyncDone || IS_VERCEL) {
+    return;
+  }
+
+  try {
+    const { adminDb } = await import("@/lib/admin-db");
+    const allSlots = adminDb.getAllSlots();
+
+    if (Object.keys(allSlots).length === 0) {
+      console.log("[startup sync] No slots to sync");
+      startupSyncDone = true;
+      return;
+    }
+
+    const slotsArray = Object.values(allSlots).map(slot => ({
+      slot_id: slot.slot_id,
+      product_id: slot.product_id,
+      product_name: slot.product_name,
+      category: slot.category,
+      retail_price: slot.retail_price,
+      discount_value: slot.discount_value,
+      image_url: slot.image_url,
+      quantity: slot.quantity,
+      last_updated: slot.last_updated,
+    }));
+
+    await sendSlotUpdateWebhook(slotsArray, undefined);
+    console.log(`[startup sync] Synced ${slotsArray.length} slots to webhook`);
+    startupSyncDone = true;
+  } catch (error) {
+    console.error("[startup sync] Error:", error);
+  }
+}
+
 // GET all vending slots
 export async function GET() {
   try {
@@ -13,10 +52,38 @@ export async function GET() {
 
     const { adminDb } = await import("@/lib/admin-db");
     const slots = adminDb.getAllSlots();
+
+    // Perform startup sync on first GET request
+    if (!startupSyncDone) {
+      performStartupSync();
+    }
+
     return NextResponse.json(slots);
   } catch (error) {
     console.error("Error fetching slots:", error);
     return NextResponse.json({});
+  }
+}
+
+// Send webhook for slot updates
+async function sendSlotUpdateWebhook(slots: any[], affectedSlotId?: number) {
+  try {
+    const { sendSlotUpdateWebhook } = await import("@/utils/webhook");
+    const { sqliteDb } = await import("@/lib/sqlite-db");
+
+    const machineLocation = sqliteDb.getMachineLocation() || process.env.NEXT_PUBLIC_MACHINE_LOCATION || "LeafWater Vending Machine";
+    const machineName = sqliteDb.getMachineName() || process.env.NEXT_PUBLIC_MACHINE_NAME || "Vending Machine";
+
+    await sendSlotUpdateWebhook({
+      slots: slots,
+      updateType: 'slot_assignment',
+      affectedSlotIds: affectedSlotId ? [affectedSlotId] : [],
+      timestamp: new Date().toISOString(),
+      machineLocation,
+      machineName,
+    });
+  } catch (error) {
+    console.error("[sendSlotUpdateWebhook] Error:", error);
   }
 }
 
@@ -119,6 +186,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    if (quantity > 10) {
+      return NextResponse.json(
+        { success: false, message: "Maximum quantity per slot is 10" },
+        { status: 400 }
+      );
+    }
+
     // Auto-fetch discount from API if not provided and product_id is given
     let finalDiscountValue = discount_value !== undefined && discount_value !== null && discount_value !== "" ? parseFloat(discount_value) : undefined;
 
@@ -160,6 +234,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Send webhook with all slot information after assignment
+    const allSlots = adminDb.getAllSlots();
+    const slotsArray = Object.values(allSlots).map(slot => ({
+      slot_id: slot.slot_id,
+      product_id: slot.product_id,
+      product_name: slot.product_name,
+      category: slot.category,
+      retail_price: slot.retail_price,
+      discount_value: slot.discount_value,
+      image_url: slot.image_url,
+      quantity: slot.quantity,
+      last_updated: slot.last_updated,
+    }));
+    sendSlotUpdateWebhook(slotsArray, parseInt(slot_id));
+
     return NextResponse.json({
       success: true,
       message: `Slot ${slot_id} updated successfully`,
@@ -169,6 +258,57 @@ export async function POST(request: NextRequest) {
     console.error("Error assigning product to slot:", error);
     return NextResponse.json(
       { success: false, message: "Failed to assign product" },
+      { status: 500 }
+    );
+  }
+}
+
+// Sync all slots to webhook (for first-time deployment or manual sync)
+export async function PATCH(request: NextRequest) {
+  try {
+    if (IS_VERCEL) {
+      return NextResponse.json(
+        { success: false, message: "Database not available in this environment" },
+        { status: 503 }
+      );
+    }
+
+    const { adminDb } = await import("@/lib/admin-db");
+    const body = await request.json();
+    const { action } = body;
+
+    if (action === "sync_webhook") {
+      // Get all slots and send to webhook
+      const allSlots = adminDb.getAllSlots();
+      const slotsArray = Object.values(allSlots).map(slot => ({
+        slot_id: slot.slot_id,
+        product_id: slot.product_id,
+        product_name: slot.product_name,
+        category: slot.category,
+        retail_price: slot.retail_price,
+        discount_value: slot.discount_value,
+        image_url: slot.image_url,
+        quantity: slot.quantity,
+        last_updated: slot.last_updated,
+      }));
+
+      await sendSlotUpdateWebhook(slotsArray, undefined);
+
+      return NextResponse.json({
+        success: true,
+        message: "All slots synced to webhook",
+        count: slotsArray.length,
+      });
+    }
+
+    return NextResponse.json(
+      { success: false, message: "Invalid action" },
+      { status: 400 }
+    );
+  } catch (error) {
+    console.error("Error syncing slots to webhook:", error);
+    return NextResponse.json(
+      { success: false, message: "Failed to sync slots" },
       { status: 500 }
     );
   }

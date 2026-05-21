@@ -3,11 +3,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Box,
-  Button,
   IconButton,
-  TextField,
   Typography,
-  useTheme,
 } from "@mui/material";
 import { Icon } from "@iconify/react";
 import Image from "next/image";
@@ -23,10 +20,68 @@ import { persistor } from "@/redux/store/store";
 import { useVoiceMessages } from "@/contexts/VoiceContext";
 import DispenseErrorReporter from "./components/DispenseErrorReporter";
 import DispenseReporter from "./components/DispenseReporter";
-import { getMachineLocation } from "@/utils/webhook";
+import SendInvoiceEmail from "./components/SendInvoiceEmail";
+import TaxInvoice from "./components/TaxInvoice";
+import FeedbackRating from "./components/FeedbackRating";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function numberToWords(num: number): string {
+  if (num === 0) return "Zero";
+  const ones = [
+    "", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine",
+    "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen",
+    "Seventeen", "Eighteen", "Nineteen",
+  ];
+  const tens = ["", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"];
+
+  const convert = (n: number): string => {
+    if (n < 20) return ones[n];
+    if (n < 100) return tens[Math.floor(n / 10)] + (n % 10 ? " " + ones[n % 10] : "");
+    if (n < 1000) return ones[Math.floor(n / 100)] + " Hundred" + (n % 100 ? " " + convert(n % 100) : "");
+    if (n < 100000) return convert(Math.floor(n / 1000)) + " Thousand" + (n % 1000 ? " " + convert(n % 1000) : "");
+    if (n < 10000000) return convert(Math.floor(n / 100000)) + " Lakh" + (n % 100000 ? " " + convert(n % 100000) : "");
+    return convert(Math.floor(n / 10000000)) + " Crore" + (n % 10000000 ? " " + convert(n % 10000000) : "");
+  };
+
+  const rupees = Math.floor(num);
+  const paise = Math.round((num - rupees) * 100);
+  let result = "INR " + convert(rupees);
+  if (paise > 0) result += " and " + convert(paise) + " Paise";
+  result += " Only";
+  return result;
+}
+
+function generateInvoiceNo(orderId?: string): string {
+  const now = new Date();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const yy = String(now.getFullYear()).slice(-2);
+  const seq = orderId ? orderId.replace(/\D/g, "").slice(-3).padStart(3, "0") : "001";
+  return `LW/${mm}/${yy}/${seq}`;
+}
+
+function formatDate(d: Date): string {
+  const day = d.getDate();
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${day}-${months[d.getMonth()]}-${String(d.getFullYear()).slice(-2)}`;
+}
+
+const parsePrice = (priceText?: string): number => {
+  if (!priceText) return 0;
+  const normalized = String(priceText).replace(/,/g, " ");
+  const match = normalized.match(/(\d+(?:\.\d+)?)/);
+  if (!match) return 0;
+  const num = Number(match[1]);
+  return Number.isFinite(num) ? num : 0;
+};
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
 
 export default function FeedbackPage() {
-  const theme = useTheme();
   const router = useRouter();
   const { data: session } = useSession();
   const dispatch = useAppDispatch();
@@ -55,12 +110,29 @@ export default function FeedbackPage() {
   >({ status: "idle" });
   const [pickupTimer, setPickupTimer] = useState<number>(0);
 
-  // Machine location from database (Settings)
-  const [machineLocation, setMachineLocation] = useState<string>("");
+  // Email state
+  const [userEmail, setUserEmail] = useState<string>("");
+  const [isEditingEmail, setIsEditingEmail] = useState(false);
+  const [isSendingEmail, setIsSendingEmail] = useState(false);
+  const [emailSent, setEmailSent] = useState(false);
+  const [emailError, setEmailError] = useState<string>("");
 
-  useEffect(() => {
-    getMachineLocation().then(setMachineLocation);
-  }, []);
+  // Keyboard target: which field the virtual keyboard is typing into
+  const [keyboardTarget, setKeyboardTarget] = useState<"notes" | "email">("notes");
+
+  // Notification state
+  const [notification, setNotification] = useState<{ message: string; type: "success" | "error" } | null>(null);
+  const emailFieldRef = useRef<HTMLDivElement>(null);
+
+  // Tax Invoice accordion
+  const [invoiceExpanded, setInvoiceExpanded] = useState(false);
+
+  // Machine location from environment or default
+  const machineLocation =
+    process.env.NEXT_PUBLIC_MACHINE_LOCATION ||
+    (session?.user as any)?.machineLocation ||
+    (checkoutSummary?.payment?.machineLocation) ||
+    "LeafWater Vending Machine";
 
   const goHome = async () => {
     hasCompletedRef.current = true;
@@ -171,23 +243,66 @@ export default function FeedbackPage() {
   }, [checkoutSummary]);
 
   const handleKeyboardKeyPress = (key: string) => {
+    const setter = keyboardTarget === "email" ? setUserEmail : setNotes;
+
     if (key === "backspace") {
-      setNotes((prev) => prev.slice(0, -1));
+      setter((prev) => prev.slice(0, -1));
       return;
     }
     if (key === "space") {
-      setNotes((prev) => `${prev} `);
+      setter((prev) => `${prev} `);
       return;
     }
     if (key === "return") {
-      setNotes((prev) => `${prev}\n`);
-      setIsKeyboardOpen(false);
+      if (keyboardTarget === "email") {
+        setIsKeyboardOpen(false);
+        handleEmailEditConfirm();
+      } else {
+        setter((prev) => `${prev}\n`);
+        setIsKeyboardOpen(false);
+      }
       return;
     }
     if (key === "shift" || key === "123" || key === "ABC" || key === "arrowleft" || key === "arrowright") {
       return;
     }
-    setNotes((prev) => `${prev}${key}`);
+    setter((prev) => `${prev}${key}`);
+  };
+
+  const handleEmailEditConfirm = async () => {
+    setIsEditingEmail(false);
+    setIsKeyboardOpen(false);
+    setKeyboardTarget("notes");
+
+    if (!userEmail || !userEmail.includes("@")) return;
+
+    const uid = (session?.user as any)?.id;
+    if (!uid) return;
+
+    try {
+      const res = await fetch("/api/user/update-email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId: uid,
+          email: userEmail,
+          name: (session?.user as any)?.name || "",
+          phoneNumber: (session?.user as any)?.mobileNumber || (session?.user as any)?.phoneNumber || "",
+          countryCode: "91",
+          onBoardingQuestions: (session?.user as any)?.onBoardingQuestions || [],
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setNotification({ message: "User details updated successfully", type: "success" });
+      } else {
+        setNotification({ message: data.error || "Failed to update email", type: "error" });
+      }
+    } catch (err: any) {
+      setNotification({ message: err.message || "Failed to update", type: "error" });
+    }
+
+    setTimeout(() => setNotification(null), 3000);
   };
 
   useEffect(() => {
@@ -357,6 +472,88 @@ export default function FeedbackPage() {
   const displayRating = hoveredRating || rating;
   const canSubmit = rating > 0 && !isSubmitting;
 
+  // Initialize email from session
+  useEffect(() => {
+    const email = (session?.user as any)?.email;
+    if (email && !userEmail) setUserEmail(email);
+  }, [session]);
+
+  // Compute invoice data
+  const invoiceData = useMemo(() => {
+    if (!checkoutSummary) return null;
+    const now = new Date();
+    const orderId = checkoutSummary?.payment?.orderId || "";
+    const subtotal = Number(checkoutSummary?.payableTotal || 0);
+    const baseForTax = subtotal / 1.05;
+    const cgst = baseForTax * 0.025;
+    const sgst = baseForTax * 0.025;
+    const beforeRound = baseForTax + cgst + sgst;
+    const roundOff = subtotal - beforeRound;
+
+    return {
+      invoiceNo: generateInvoiceNo(orderId),
+      invoiceDate: formatDate(now),
+      orderReference: orderId ? `${orderId} dated ${formatDate(now)}` : formatDate(now),
+      gstin: process.env.NEXT_PUBLIC_GSTIN || "36AAKCL W1234A1ZC",
+      state: process.env.NEXT_PUBLIC_STATE || "Telangana, Code : 36",
+      placeOfSupply: process.env.NEXT_PUBLIC_STATE || "Telangana",
+      items: checkoutItems.map((item: any) => {
+        const price = Number(item?.retail_price || 0) || parsePrice(item?.priceText);
+        const qty = Number(item?.quantity) || 1;
+        return {
+          name: item?.name || "",
+          quantity: qty,
+          price,
+          amount: price * qty,
+        };
+      }),
+      subtotal,
+      cgst,
+      sgst,
+      roundOff,
+      grandTotal: subtotal,
+      amountInWords: numberToWords(subtotal),
+      buyerName: (session?.user as any)?.name || "",
+      buyerEmail: (session?.user as any)?.email || "",
+      buyerPhone: (session?.user as any)?.mobileNumber || (session?.user as any)?.phoneNumber || "",
+    };
+  }, [checkoutSummary, checkoutItems, session]);
+
+  const handleSendEmail = async () => {
+    if (!userEmail || !userEmail.includes("@") || !invoiceData) return;
+    setIsSendingEmail(true);
+    setEmailError("");
+    try {
+      // Include updated user details in the invoice payload
+      const invoiceWithUser = {
+        ...invoiceData,
+        buyerEmail: userEmail,
+        buyerName: (session?.user as any)?.name || invoiceData.buyerName || "",
+        buyerPhone: (session?.user as any)?.mobileNumber || (session?.user as any)?.phoneNumber || (session?.user as any)?.phone || invoiceData.buyerPhone || "",
+      };
+
+      const response = await fetch("/api/send-invoice-email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: userEmail, invoice: invoiceWithUser }),
+      });
+      const result = await response.json();
+      if (result.success) {
+        setEmailSent(true);
+      } else {
+        setEmailError(result.error || "Failed to send email");
+      }
+    } catch (err: any) {
+      setEmailError(err.message || "Failed to send email");
+    } finally {
+      setIsSendingEmail(false);
+    }
+  };
+
+  // -------------------------------------------------------------------------
+  // RENDER
+  // -------------------------------------------------------------------------
+
   return (
     <PageBackground fitParent>
       <Box
@@ -370,10 +567,12 @@ export default function FeedbackPage() {
           alignItems: "center",
           px: 3,
           pt: 3,
-          
+          pb: 6,
           boxSizing: "border-box",
+          overflowY: "auto",
         }}
       >
+        {/* Close / Help button */}
         <IconButton
           onClick={handleClose}
           sx={{
@@ -390,15 +589,8 @@ export default function FeedbackPage() {
           <Icon icon="mdi:help-circle-outline" width={22} />
         </IconButton>
 
-        <Box
-          sx={{
-            width: "100%",
-            display: "flex",
-            justifyContent: "center",
-            mt: 2,
-            mb: 2,
-          }}
-        >
+        {/* -------- LOGO -------- */}
+        <Box sx={{ width: "100%", display: "flex", justifyContent: "center", mt: 2, mb: 2 }}>
           <Box
             sx={{
               bgcolor: "#ffffff",
@@ -414,32 +606,18 @@ export default function FeedbackPage() {
               component="button"
               type="button"
               onClick={goHome}
-              sx={{
-                all: "unset",
-                cursor: "pointer",
-                display: "block",
-                width: "100%",
-                height: "100%",
-                position: "relative",
-              }}
+              sx={{ all: "unset", cursor: "pointer", display: "block", width: "100%", height: "100%", position: "relative" }}
             >
-              <Image
-                src="/wending/goldlog.svg"
-                alt="Leaf Water"
-                fill
-                sizes="520px"
-                style={{ objectFit: "contain" }}
-                priority
-              />
+              <Image src="/wending/goldlog.svg" alt="Leaf Water" fill sizes="520px" style={{ objectFit: "contain" }} priority />
             </Box>
           </Box>
         </Box>
 
-        <Box sx={{ width: "min(860px, 100%)", mt: 3 }}>
+        {/* -------- PAYMENT SUCCESSFUL BANNER -------- */}
+        <Box sx={{ width: "min(860px, 100%)", mt: 1 }}>
           <Box
             sx={{
-              width: "100%",
-              bgcolor: "#1f4d3d",
+              bgcolor: "#f0faf5",
               borderRadius: 3,
               px: 3,
               py: 2.5,
@@ -447,423 +625,208 @@ export default function FeedbackPage() {
               alignItems: "center",
               justifyContent: "space-between",
               gap: 2,
-              boxShadow: "0 10px 24px rgba(0,0,0,0.08)",
+              border: "1px solid #d1fae5",
             }}
           >
-            <Box sx={{ color: "#ffffff", minWidth: 0 }}>
-              <Typography sx={{ fontSize: 24, opacity: 0.85, letterSpacing: 0.5, pb: 2 }}>
-                LEARN MORE
-              </Typography>
-              <Typography sx={{ fontSize: 32, fontWeight: 700, mt: 0.5, pb: 2 }}>
-                About Leafwater
-              </Typography>
-              <Typography sx={{ fontSize: 24, opacity: 0.9, mt: 0.5, maxWidth: 520 }}>
-                Deep insights into your skin, powered by intelligent diagnostics,
-              </Typography>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
+              <Image src="/NewFeedback/check_success_circle.svg" alt="Success" width={48} height={48} />
+              <Box>
+                <Typography sx={{ fontSize: 32, fontWeight: 700, color: "#111827" }}>
+                  Payment Successful
+                </Typography>
+                <Typography sx={{ fontSize: 24, color: "#6b7280", mt: 0.5 }}>
+                  Your tax invoice is available below.
+                </Typography>
+              </Box>
             </Box>
-            <Box sx={{ bgcolor: "#ffffff", borderRadius: 2, p: 1, flexShrink: 0 }}>
-              <Image src="/products/leafwatwerQR.jpeg" alt="QR" width={120} height={120} />
-            </Box>
+            <Image src="/NewFeedback/shopping_bag_and_bottle.svg" alt="" width={80} height={80} />
           </Box>
         </Box>
 
-        <Box
-          sx={{
-            width: "min(860px, 100%)",
-            mt: 2,
-            mb: 0,
-            display: "flex",
-            flexDirection: "column",
-            gap: 1,
-          }}
-        >
-          {checkoutSummary ? (
-            <Box
-              sx={{
-                width: "100%",
-                bgcolor: "#ffffff",
-                borderRadius: 3,
-                px: 3,
-                py: 2,
-                border: "1px solid #e5e7eb",
-              }}
-            >
-              <Typography sx={{ alignItems: "center",justifyContent: "center",fontSize: 28, fontWeight: 800, mb:2 , textAlign: "center" }}>
-                Order Summary
-              </Typography>
-              <Box
-                sx={{
-                  display: "grid",
-                  gridTemplateColumns: { xs: "1fr 1fr", md: "repeat(4, 1fr)" },
-                  gap: 1.5,
-                  alignItems: "start",
-                }}
-              >
-                <Typography sx={{ fontSize: 24, color: "#374151" }}>
-                  Items: {checkoutItems.length}
-                </Typography>
-                <Typography sx={{ fontSize: 24, color: "#374151" }}>
-                  Total: ₹{Number(checkoutSummary?.total || 0).toFixed(2)}
-                </Typography>
-                <Typography sx={{ fontSize: 24, color: "#374151" }}>
-                  Discount: ₹{Number(checkoutSummary?.discount || 0).toFixed(2)}
-                </Typography>
-                <Typography sx={{ fontSize: 24, fontWeight: 800, color: "#111827" }}>
-                  Paid: ₹{Number(checkoutSummary?.payableTotal || 0).toFixed(2)}
-                </Typography>
+        {/* -------- DISPENSE STATUS -------- */}
+        {checkoutSummary && (
+          <Box sx={{ width: "min(860px, 100%)", mt: 2 }}>
+            {(dispenseState.status === "idle" || dispenseState.status === "running") && (
+              <Box sx={{ bgcolor: "#fff", borderRadius: 3, px: 3, py: 2, border: "1px solid #e5e7eb", textAlign: "center" }}>
+                <Typography sx={{ fontSize: 24, color: "#374151" }}>Dispensing your products...</Typography>
               </Box>
-
-              <Box sx={{ mt: 1 }}>
-                <Typography sx={{ fontSize: 24, fontWeight: 800 }}>
-                  Dispense Status
-                </Typography>
-                {dispenseState.status === "idle" || dispenseState.status === "running" ? (
-                  <Typography sx={{ fontSize: 24, color: "#374151" }}>
-                    Dispensing...
-                  </Typography>
-                ) : dispenseState.status === "done" ? (
-                  <>
-                    <DispenseReporter
-                      active={dispenseState.status === "done"}
-                      user={{
-                        userId: (session?.user as any)?.id,
-                        name: (session?.user as any)?.name,
-                        email: (session?.user as any)?.email,
-                        phone: (session?.user as any)?.mobileNumber || (session?.user as any)?.phoneNumber || (session?.user as any)?.phone,
-                      }}
-                      products={checkoutItems.map((item: any) => ({
-                        id: item?.id,
-                        name: item?.name,
-                        quantity: item?.quantity,
-                        slotId: item?.slotId,
-                        retailPrice: item?.retail_price,
-                        amount: item?.amount,
-                      }))}
-                      transaction={checkoutSummary?.payment}
-                      command={{
-                        productId: (dispenseState.results as any)?.productId || checkoutItems[0]?.id,
-                        productName: (dispenseState.results as any)?.productName || checkoutItems[0]?.name,
-                        slotId: (dispenseState.results as any)?.slotId || checkoutItems[0]?.slotId || (checkoutItems[0]?.id?.replace(/^products\//, '')),
-                        command: (dispenseState.results as any)?.command || "DISPENSE",
-                        timestamp: new Date().toISOString(),
-                      }}
-                      machineLocation={machineLocation}
-                    />
-                    <Typography sx={{ fontSize: 20, color: "#166534" }}>
-                      Dispensed successfully
-                    </Typography>
-                    {pickupTimer > 0 && (
-                      <Box sx={{
-                        mt: 2,
-                        p: 2,
-                        bgcolor: "#fef3c7",
-                        borderRadius: 2,
-                        border: "2px solid #f59e0b",
-                        textAlign: "center"
-                      }}>
-                        <Typography sx={{ fontSize: 20, fontWeight: 700, color: "#92400e" }}>
-                          ⏱️ Pickup your product
-                        </Typography>
-                        <Typography sx={{ fontSize: 36, fontWeight: 800, color: "#d97706", mt: 1 }}>
-                          {pickupTimer}s
-                        </Typography>
-                        <Typography sx={{ fontSize: 16, color: "#92400e", mt: 0.5 }}>
-                          Tray door will close soon
-                        </Typography>
-                      </Box>
-                    )}
-                  </>
-                ) : (
-                  <>
-                    <DispenseErrorReporter
-                      active={dispenseState.status === "error"}
-                      errorMessage={dispenseState.status === "error" ? dispenseState.message : ""}
-                      user={{
-                        userId: (session?.user as any)?.id,
-                        name: (session?.user as any)?.name,
-                        email: (session?.user as any)?.email,
-                        phone: (session?.user as any)?.mobileNumber || (session?.user as any)?.phoneNumber || (session?.user as any)?.phone,
-                      }}
-                      products={checkoutItems.map((item: any) => ({
-                        id: item?.id,
-                        name: item?.name,
-                        quantity: item?.quantity,
-                        slotId: item?.slotId,
-                        retailPrice: item?.retail_price,
-                        amount: item?.amount,
-                      }))}
-                      payment={checkoutSummary?.payment}
-                      raw={dispenseState.status === "error" ? dispenseState : null}
-                      machineLocation={machineLocation}
-                    />
-                    <Box sx={{
-                      mt: 1,
-                      p: 2,
-                      bgcolor: "#fef2f2",
-                      borderRadius: 2,
-                      border: "2px solid #ef4444"
-                    }}>
-                      <Typography sx={{ fontSize: 30, fontWeight: 700, color: "#b91c1c", mb: 1 }}>
-                        ⚠️ Product Dispensing Issue
-                      </Typography>
-                      <Typography sx={{ fontSize: 24, color: "#7f1d1d", mb: 1.5 }}>
-                        {dispenseState.message}
-                      </Typography>
-                      <Box sx={{
-                        bgcolor: "#ffffff",
-                        p: 2,
-                        borderRadius: 2,
-                        border: "1px solid #fecaca"
-                      }}>
-                        <Typography sx={{ fontSize: 28, fontWeight: 600, color: "#166534", mb: 1 }}>
-                          Don&apos;t worry! 🙏
-                        </Typography>
-                        <Typography sx={{ fontSize: 24, color: "#374151", lineHeight: 1.6 }}>
-                          Your amount will be refunded to your original payment method. Our team members will get back to you on this issue shortly.
-                        </Typography>
-                        <Typography sx={{ fontSize: 24, color: "#6b7280", mt: 1.5, fontStyle: "italic" }}>
-                          For immediate assistance, please contact our support team. (+91 8008675263)
-                        </Typography>
-                      </Box>
-                    </Box>
-                  </>
-                )}
-              </Box>
-            </Box>
-          ) : null}
-        </Box>
-
-        <Box
-          sx={{
-            width: "min(860px, 100%)",
-            mt: 0,
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            textAlign: "center",
-            gap: 0.5,
-            mb: 2,
-          }}
-        >
-          <Typography sx={{ fontWeight: 800, letterSpacing: 3, fontSize: 32, pb: 2, pt: 4 }}>
-            THANK YOU!
-          </Typography>
-          <Typography sx={{ fontSize: 24, color: "#111827" }}>
-            Please remember to retrieve your item!
-          </Typography>
-          <Typography sx={{ fontSize: 24, color: "#111827" }}>
-            Have a nice day!
-          </Typography>
-        </Box>
-
-        <Box
-          sx={{
-            width: "min(860px, 100%)",
-            mt: 2,
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            textAlign: "center",
-          }}
-        >
-          <Typography sx={{ fontSize: 28, fontWeight: 700, pb: 2 }}>Quick Favour?</Typography>
-          <Typography sx={{ fontSize: 24, color: "#374151", mt: 0.5 }}>
-            Kindly rate your experience with us so far.
-          </Typography>
-
-          <Box sx={{ display: "flex", gap: 1, mt: 2 }}>
-            {[1, 2, 3, 4, 5].map((star) => (
-              <IconButton
-                key={star}
-                onClick={() => handleStarClick(star)}
-                onMouseEnter={() => handleStarHover(star)}
-                onMouseLeave={handleStarLeave}
-                sx={{ p: 1, bgcolor: "transparent" }}
-              >
-                <Icon
-                  icon={star <= displayRating ? "mdi:star" : "mdi:star-outline"}
-                  width={60}
-                  color={star <= displayRating ? "#f59e0b" : "#cfcfcf"}
+            )}
+            {dispenseState.status === "done" && (
+              <>
+                <DispenseReporter
+                  active
+                  user={{
+                    userId: (session?.user as any)?.id,
+                    name: (session?.user as any)?.name,
+                    email: (session?.user as any)?.email,
+                    phone: (session?.user as any)?.mobileNumber || (session?.user as any)?.phoneNumber || (session?.user as any)?.phone,
+                  }}
+                  products={checkoutItems.map((item: any) => ({
+                    id: item?.id, name: item?.name, quantity: item?.quantity,
+                    slotId: item?.slotId, retailPrice: item?.retail_price, amount: item?.amount,
+                  }))}
+                  transaction={checkoutSummary?.payment}
+                  command={{
+                    productId: (dispenseState.results as any)?.productId || checkoutItems[0]?.id,
+                    productName: (dispenseState.results as any)?.productName || checkoutItems[0]?.name,
+                    slotId: (dispenseState.results as any)?.slotId || checkoutItems[0]?.slotId || (checkoutItems[0]?.id?.replace(/^products\//, "")),
+                    command: (dispenseState.results as any)?.command || "DISPENSE",
+                    timestamp: new Date().toISOString(),
+                  }}
+                  machineLocation={machineLocation}
                 />
-              </IconButton>
-            ))}
+                {pickupTimer > 0 && (
+                  <Box sx={{ bgcolor: "#fef3c7", borderRadius: 2, border: "2px solid #f59e0b", textAlign: "center", p: 2 }}>
+                    <Typography sx={{ fontSize: 24, fontWeight: 700, color: "#92400e" }}>
+                      Pickup your product
+                    </Typography>
+                    <Typography sx={{ fontSize: 36, fontWeight: 800, color: "#d97706", mt: 1 }}>{pickupTimer}s</Typography>
+                    <Typography sx={{ fontSize: 24, color: "#92400e", mt: 0.5 }}>Tray door will close soon</Typography>
+                  </Box>
+                )}
+              </>
+            )}
+            {dispenseState.status === "error" && (
+              <>
+                <DispenseErrorReporter
+                  active
+                  errorMessage={dispenseState.message}
+                  user={{
+                    userId: (session?.user as any)?.id,
+                    name: (session?.user as any)?.name,
+                    email: (session?.user as any)?.email,
+                    phone: (session?.user as any)?.mobileNumber || (session?.user as any)?.phoneNumber || (session?.user as any)?.phone,
+                  }}
+                  products={checkoutItems.map((item: any) => ({
+                    id: item?.id, name: item?.name, quantity: item?.quantity,
+                    slotId: item?.slotId, retailPrice: item?.retail_price, amount: item?.amount,
+                  }))}
+                  payment={checkoutSummary?.payment}
+                  raw={dispenseState}
+                  machineLocation={machineLocation}
+                />
+                <Box sx={{ bgcolor: "#fef2f2", borderRadius: 2, border: "2px solid #ef4444", p: 2 }}>
+                  <Typography sx={{ fontSize: 24, fontWeight: 700, color: "#b91c1c", mb: 1 }}>
+                    Product Dispensing Issue
+                  </Typography>
+                  <Typography sx={{ fontSize: 24, color: "#7f1d1d", mb: 1 }}>{dispenseState.message}</Typography>
+                  <Box sx={{ bgcolor: "#fff", p: 2, borderRadius: 2, border: "1px solid #fecaca" }}>
+                    <Typography sx={{ fontSize: 24, fontWeight: 600, color: "#166534", mb: 1 }}>
+                      Don&apos;t worry!
+                    </Typography>
+                    <Typography sx={{ fontSize: 24, color: "#374151", lineHeight: 1.6 }}>
+                      Your amount will be refunded to your original payment method. Our team will get back to you shortly.
+                    </Typography>
+                    <Typography sx={{ fontSize: 24, color: "#6b7280", mt: 1, fontStyle: "italic" }}>
+                      For immediate assistance: +91 8008675263
+                    </Typography>
+                  </Box>
+                </Box>
+              </>
+            )}
           </Box>
+        )}
 
-          <Box sx={{ width: "min(520px, 100%)", mt: 2.5, pb: isKeyboardOpen ? "320px" : 0 }} ref={textFieldRef}>
-            <TextField
-              fullWidth
-              multiline
-              rows={2}
-              placeholder="Tell us more (optional)"
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              onFocus={() => {
-                setIsKeyboardOpen(true);
-                // Scroll TextField into view after keyboard opens
-                setTimeout(() => {
-                  textFieldRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-                }, 100);
-              }}
-              onClick={() => {
-                setIsKeyboardOpen(true);
-                setTimeout(() => {
-                  textFieldRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-                }, 100);
-              }}
-              sx={{
-                "& .MuiOutlinedInput-root": {
-                  borderRadius: "12px",
-                  bgcolor: "#ffffff",
-                  fontSize: 24,
-                  "& textarea": {
-                    fontSize: 24,
-                  },
-                  "& textarea::placeholder": {
-                    fontSize: 24,
-                    opacity: 0.8,
-                  },
-                  "& fieldset": {
-                    borderColor: "#d1d5db",
-                  },
-                  "&:hover fieldset": {
-                    borderColor: "#9ca3af",
-                  },
-                  "&.Mui-focused fieldset": {
-                    borderColor: "#9ca3af",
-                  },
-                },
-              }}
-            />
+        {/* -------- SEND INVOICE TO EMAIL -------- */}
+        {invoiceData && (
+          <SendInvoiceEmail
+            userEmail={userEmail}
+            isEditingEmail={isEditingEmail}
+            isSendingEmail={isSendingEmail}
+            emailSent={emailSent}
+            emailError={emailError}
+            emailFieldRef={emailFieldRef}
+            onEditStart={() => {
+              setIsEditingEmail(true);
+            }}
+            onEditConfirm={handleEmailEditConfirm}
+            onSendEmail={handleSendEmail}
+            onEmailChange={setUserEmail}
+          />
+        )}
 
-            <Button
-              fullWidth
-              variant="contained"
-              onClick={handleSubmit}
-              disabled={!canSubmit}
-              sx={{
-                mt: 2,
-                bgcolor: "#1f4d3d",
-                color: "#fff",
-                py: 1.25,
-                borderRadius: "12px",
-                fontSize: 24,
-                fontWeight: 700,
-                textTransform: "none",
-                "&:hover": {
-                  bgcolor: "#16362c",
-                },
-                "&:disabled": {
-                  bgcolor: "#d1d5db",
-                  color: "#ffffff",
-                },
-              }}
-            >
-              {isSubmitting ? "Submitting..." : "Submit"}
-            </Button>
-          </Box>
+        {/* -------- TAX INVOICE (collapsible) -------- */}
+        {invoiceData && (
+          <TaxInvoice
+            invoiceData={invoiceData}
+            invoiceExpanded={invoiceExpanded}
+            onToggleExpanded={() => setInvoiceExpanded((prev) => !prev)}
+          />
+        )}
+
+        {/* -------- FEEDBACK SECTION -------- */}
+        <FeedbackRating
+          rating={rating}
+          displayRating={displayRating}
+          notes={notes}
+          isSubmitting={isSubmitting}
+          canSubmit={canSubmit}
+          isKeyboardOpen={isKeyboardOpen}
+          textFieldRef={textFieldRef}
+          onStarClick={handleStarClick}
+          onStarHover={handleStarHover}
+          onStarLeave={handleStarLeave}
+          onNotesChange={setNotes}
+          onNotesFocus={() => {
+            setKeyboardTarget("notes");
+            setIsKeyboardOpen(true);
+            setTimeout(() => { textFieldRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }); }, 100);
+          }}
+          onNotesClick={() => {
+            setKeyboardTarget("notes");
+            setIsKeyboardOpen(true);
+            setTimeout(() => { textFieldRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }); }, 100);
+          }}
+          onSubmit={handleSubmit}
+        />
+
+        {/* -------- COMPUTER GENERATED INVOICE FOOTER -------- */}
+        <Box sx={{ width: "min(860px, 100%)", mt: 3, mb: 2, textAlign: "center", display: "flex", alignItems: "center", justifyContent: "center", gap: 1 }}>
+          <Image src="/NewFeedback/lock_icon.svg" alt="" width={14} height={14} />
+          <Typography sx={{ fontSize: 24, color: "#9ca3af" }}>This is a computer generated invoice.</Typography>
         </Box>
 
+        {/* -------- VIRTUAL KEYBOARD -------- */}
         {isKeyboardOpen ? (
           <Box
-            onClick={() => setIsKeyboardOpen(false)}
-            sx={{
-              position: "fixed",
-              inset: 0,
-              zIndex: 1400,
+            onClick={() => {
+              setIsKeyboardOpen(false);
+              if (keyboardTarget === "email") {
+                handleEmailEditConfirm();
+              }
             }}
+            sx={{ position: "fixed", inset: 0, zIndex: 1400 }}
           >
-            <Box
-              onClick={(e) => e.stopPropagation()}
-              sx={{
-                position: "absolute",
-                left: 0,
-                right: 0,
-                bottom: 0,
-              }}
-            >
-              <VirtualKeyboard
-                onKeyPress={handleKeyboardKeyPress}
-                layout="default"
-                visible={isKeyboardOpen}
-              />
+            <Box onClick={(e) => e.stopPropagation()} sx={{ position: "absolute", left: 0, right: 0, bottom: 0 }}>
+              <VirtualKeyboard onKeyPress={handleKeyboardKeyPress} layout={keyboardTarget === "email" ? "email" : "default"} visible={isKeyboardOpen} />
             </Box>
           </Box>
         ) : null}
 
-        <Box
-          sx={{
-            width: "min(860px, 100%)",
-            mt: 5,
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-          }}
-        >
-          <Box sx={{ display: "flex", alignItems: "center",  mb: 2,flexWrap: "nowrap", gap: 2 }}>
-            <Typography sx={{ fontSize: 28, fontWeight: 800 , whiteSpace: "nowrap", }}>Need Help?</Typography>
-            <Button
-              variant="outlined"
-              onClick={() => setHelpDialogOpen(true)}
-              sx={{
-                borderRadius: 2,
-                borderColor: "#2d5a3d",
-                color: "#2d5a3d",
-                fontSize: 18,
-                fontWeight: 600,
-                textTransform: "none",
-                px: 1,
-                py: 1,
-                "&:hover": {
-                  borderColor: "#1e3d2a",
-                  bgcolor: "#f0fdf4",
-                },
-              }}
-            >
-              Click Here
-            </Button>
-          </Box>
+        {/* -------- NOTIFICATION TOAST -------- */}
+        {notification && (
           <Box
             sx={{
-              width: "100%",
-              display: "grid",
-              gridTemplateColumns: "1fr 1px 1fr",
+              position: "fixed",
+              top: 24,
+              left: "50%",
+              transform: "translateX(-50%)",
+              zIndex: 2000,
+              bgcolor: notification.type === "success" ? "#16a34a" : "#dc2626",
+              color: "#fff",
+              px: 3,
+              py: 1.5,
+              borderRadius: "12px",
+              boxShadow: "0 4px 20px rgba(0,0,0,0.15)",
+              display: "flex",
               alignItems: "center",
-              gap: 2,
+              gap: 1,
             }}
           >
-            <Box sx={{ textAlign: "center" }}>
-              <Typography sx={{ fontSize: 24, color: "#374151", pb: 2 }}>WhatsApp us:</Typography>
-              <Typography sx={{ fontSize: 24, color: "#111827", fontWeight: 700 }}>
-                +91 8008675263
-              </Typography>
-            </Box>
-            <Box
-              sx={{
-                height: 120,
-                bgcolor: "#000",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-              }}
-            />
-            <Box
-              sx={{
-                width: "100%",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 1,
-              }}
-            >
-              <Typography sx={{ fontSize: 24, color: "#374151" }}>
-                Scan this <br /> QR Code
-              </Typography>
-              <Box sx={{ bgcolor: "#ffffff", borderRadius: 1, p: 0.75, flexShrink: 0 }}>
-                <Image src="/products/needsupportQR.jpeg" alt="QR" width={100} height={100} />
-              </Box>
-            </Box>
+            <Icon icon={notification.type === "success" ? "mdi:check-circle" : "mdi:alert-circle"} width={22} />
+            <Typography sx={{ fontSize: 24, fontWeight: 600 }}>{notification.message}</Typography>
           </Box>
-        </Box>
+        )}
       </Box>
 
       {/* Help Dialog */}

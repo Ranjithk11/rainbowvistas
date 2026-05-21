@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { adminDb } from "@/lib/admin-db";
 
 // GET slot info by ID
 export async function GET(
@@ -7,6 +6,7 @@ export async function GET(
   { params }: { params: Promise<{ slotId: string }> }
 ) {
   try {
+    const { adminDb } = await import("@/lib/admin-db");
     const { slotId } = await params;
     const slot = adminDb.getSlot(parseInt(slotId));
 
@@ -33,6 +33,7 @@ export async function PATCH(
   { params }: { params: Promise<{ slotId: string }> }
 ) {
   try {
+    const { adminDb } = await import("@/lib/admin-db");
     const { slotId } = await params;
     const body = await request.json();
     const { change_amount, quantity } = body;
