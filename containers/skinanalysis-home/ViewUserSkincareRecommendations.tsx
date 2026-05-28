@@ -33,7 +33,9 @@ import LipsProductsView from "./Recommendations/LipProducts";
 import TopLogo from "./Recommendations/TopLogo";
 import { APP_ROUTES } from "@/utils/routes";
 import { useTheme } from "@mui/material/styles";
-import { sendScanCompletedWebhook, getMachineLocation } from "@/utils/webhook";
+import { sendScanCompletedWebhook } from "@/utils/webhook";
+import { useCart } from "./Recommendations/CartContext";
+import CartProduct from "./Recommendations/cartProduct";
 
 const StyledViewAdminSkincareReport = styled(Container)(({ theme }) => ({
   minHeight: "100vh",
@@ -119,7 +121,7 @@ const ViewAdminSkincareReport = () => {
   const theme = useTheme();
   const isKiosk = useMediaQuery(theme.breakpoints.up("md"));
   const [openCart, setOpenCart] = useState(false);
-  const cartCount = 0;
+  const { count: cartCount } = useCart();
   const whatsappNumber = "918977016605";
   const whatsappMessage = "Hello, I need help with my skin analysis!";
   const [fetchAdminRecommendationsById, { isLoading, isError, data }] =
@@ -161,16 +163,33 @@ const ViewAdminSkincareReport = () => {
       // The webhook utility de-duplicates per userId per session so it only fires once.
       const user = data?.data?.user as any;
       if (user?._id) {
-        getMachineLocation().then((machineLocation) => {
-          void sendScanCompletedWebhook({
-            name: user?.name,
-            email: user?.email,
-            phone: user?.mobileNumber || user?.phoneNumber || user?.phone,
-            userId: user?._id,
-            machineName: process.env.NEXT_PUBLIC_MACHINE_NAME || "Vending Machine",
-            machineLocation,
+        // Fetch machine settings from database
+        fetch("/api/admin/machine-name")
+          .then(res => res.json())
+          .then(data => {
+            if (data.success) {
+              void sendScanCompletedWebhook({
+                name: user?.name,
+                email: user?.email,
+                phone: user?.mobileNumber || user?.phoneNumber || user?.phone,
+                userId: user?._id,
+                machineName: data.machineName || process.env.NEXT_PUBLIC_MACHINE_NAME || "Vending Machine",
+                machineLocation: data.machineLocation || process.env.NEXT_PUBLIC_MACHINE_LOCATION || "LeafWater Vending Machine",
+              });
+            }
+          })
+          .catch(err => {
+            console.error("[ViewUserSkincareRecommendations] Failed to fetch machine settings:", err);
+            // Fallback to env vars
+            void sendScanCompletedWebhook({
+              name: user?.name,
+              email: user?.email,
+              phone: user?.mobileNumber || user?.phoneNumber || user?.phone,
+              userId: user?._id,
+              machineName: process.env.NEXT_PUBLIC_MACHINE_NAME || "Vending Machine",
+              machineLocation: process.env.NEXT_PUBLIC_MACHINE_LOCATION || "LeafWater Vending Machine",
+            });
           });
-        });
       }
     }
   }, [data]);
@@ -183,7 +202,7 @@ const ViewAdminSkincareReport = () => {
             isKiosk={isKiosk}
             cartCount={cartCount}
             onCartClick={() => setOpenCart(true)}
-            onScanAgainClick={() => router.push(APP_ROUTES.SELFIE)}
+            onScanAgainClick={() => router.push(APP_ROUTES.HOME)}
           />
 
           {/* Spacer for fixed TopLogo header */}
@@ -302,6 +321,7 @@ const ViewAdminSkincareReport = () => {
           </Box>
         </Box>
       )}
+      <CartProduct open={openCart} onClose={() => setOpenCart(false)} />
       <Paper
         onClick={handleWhatsAppClick}
         component="div"

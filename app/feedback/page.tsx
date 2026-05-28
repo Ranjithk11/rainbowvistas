@@ -3,13 +3,14 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Box,
+  Button,
   IconButton,
   Typography,
 } from "@mui/material";
 import { Icon } from "@iconify/react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
-import { useSession } from "next-auth/react";
+import { useSession, signOut } from "next-auth/react";
 import PageBackground from "@/components/ui/PageBackground";
 import { HelpDialog } from "@/components/ui";
 import VirtualKeyboard from "@/components/ui/VirtualKeyboard";
@@ -23,6 +24,7 @@ import DispenseReporter from "./components/DispenseReporter";
 import SendInvoiceEmail from "./components/SendInvoiceEmail";
 import TaxInvoice from "./components/TaxInvoice";
 import FeedbackRating from "./components/FeedbackRating";
+import PaymentReporter from "./components/PaymentReporter";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -124,6 +126,24 @@ export default function FeedbackPage() {
   const [notification, setNotification] = useState<{ message: string; type: "success" | "error" } | null>(null);
   const emailFieldRef = useRef<HTMLDivElement>(null);
 
+  // Machine info (fallback when no user session, e.g. direct purchase from /products or /slots)
+  const [machineInfo, setMachineInfo] = useState<{ machineId: string; machineName: string; machineLocation: string } | null>(null);
+
+  useEffect(() => {
+    fetch("/api/admin/machine-name")
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.success) {
+          setMachineInfo({
+            machineId: data.machineId || "",
+            machineName: data.machineName || "",
+            machineLocation: data.machineLocation || "",
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   // Tax Invoice accordion
   const [invoiceExpanded, setInvoiceExpanded] = useState(false);
 
@@ -149,6 +169,9 @@ export default function FeedbackPage() {
       }
       dispatch(clearCart());
       await persistor.purge();
+      try {
+        await signOut({ redirect: false });
+      } catch {}
     } finally {
       router.push(APP_ROUTES.HOME);
     }
@@ -507,17 +530,55 @@ export default function FeedbackPage() {
           amount: price * qty,
         };
       }),
+      totalQty: checkoutItems.reduce((sum: number, item: any) => sum + (Number(item?.quantity) || 1), 0),
+      itemsTotal: baseForTax.toFixed(2),
       subtotal,
       cgst,
       sgst,
+      cgstPayable: cgst,
+      sgstPayable: sgst,
       roundOff,
       grandTotal: subtotal,
       amountInWords: numberToWords(subtotal),
-      buyerName: (session?.user as any)?.name || "",
+      buyerName: (session?.user as any)?.name || `Walk-in Customer – ${machineInfo?.machineName || "Vending Machine"}`,
       buyerEmail: (session?.user as any)?.email || "",
       buyerPhone: (session?.user as any)?.mobileNumber || (session?.user as any)?.phoneNumber || "",
+      machineId: machineInfo?.machineId || "",
+      machineName: machineInfo?.machineName || "",
+      machineLocation: machineInfo?.machineLocation || "",
     };
-  }, [checkoutSummary, checkoutItems, session]);
+  }, [checkoutSummary, checkoutItems, session, machineInfo]);
+
+  // Auto-send invoice data to webhook on page load (no email needed)
+  const invoiceWebhookFiredRef = useRef(false);
+  useEffect(() => {
+    if (!invoiceData || invoiceWebhookFiredRef.current) return;
+    invoiceWebhookFiredRef.current = true;
+
+    const invoicePayload = {
+      ...invoiceData,
+      buyerName: invoiceData.buyerName || `Walk-in Customer – ${machineInfo?.machineName || "Vending Machine"}`,
+      buyerPhone: invoiceData.buyerPhone || "",
+      buyerEmail: invoiceData.buyerEmail || "",
+    };
+
+    fetch("/api/send-invoice-email", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: invoicePayload.buyerEmail || "noreply@leafwater.in", invoice: invoicePayload }),
+    })
+      .then((res) => res.json())
+      .then((result) => {
+        if (result.success) {
+          console.log("[FeedbackPage] Invoice webhook auto-sent successfully");
+        } else {
+          console.warn("[FeedbackPage] Invoice webhook failed:", result.error);
+        }
+      })
+      .catch((err) => {
+        console.warn("[FeedbackPage] Invoice webhook error:", err);
+      });
+  }, [invoiceData, machineInfo]);
 
   const handleSendEmail = async () => {
     if (!userEmail || !userEmail.includes("@") || !invoiceData) return;
@@ -528,7 +589,7 @@ export default function FeedbackPage() {
       const invoiceWithUser = {
         ...invoiceData,
         buyerEmail: userEmail,
-        buyerName: (session?.user as any)?.name || invoiceData.buyerName || "",
+        buyerName: (session?.user as any)?.name || invoiceData.buyerName || `Walk-in Customer – ${machineInfo?.machineName || "Vending Machine"}`,
         buyerPhone: (session?.user as any)?.mobileNumber || (session?.user as any)?.phoneNumber || (session?.user as any)?.phone || invoiceData.buyerPhone || "",
       };
 
@@ -556,6 +617,29 @@ export default function FeedbackPage() {
 
   return (
     <PageBackground fitParent>
+      {/* Payment webhook safety net — fires once per orderId if cartProduct unmounted too fast */}
+      {checkoutSummary?.payment?.orderId && (
+        <PaymentReporter
+          active
+          user={{
+            userId: (session?.user as any)?.id || machineInfo?.machineId || "",
+            name: (session?.user as any)?.name || `Walk-in – ${machineInfo?.machineName || "Vending Machine"}`,
+            email: (session?.user as any)?.email || "",
+            phone: (session?.user as any)?.mobileNumber || (session?.user as any)?.phoneNumber || (session?.user as any)?.phone || "",
+          }}
+          products={checkoutItems.map((item: any) => ({
+            id: item?.id,
+            name: item?.name,
+            quantity: item?.quantity,
+            slotId: item?.slotId,
+            retailPrice: item?.retail_price,
+            amount: item?.amount,
+          }))}
+          transaction={checkoutSummary?.payment}
+          machineLocation={machineInfo?.machineLocation || machineLocation}
+          machineName={machineInfo?.machineName || "Vending Machine"}
+        />
+      )}
       <Box
         sx={{
           position: "relative",
@@ -572,22 +656,39 @@ export default function FeedbackPage() {
           overflowY: "auto",
         }}
       >
-        {/* Close / Help button */}
-        <IconButton
-          onClick={handleClose}
-          sx={{
-            position: "absolute",
-            top: 18,
-            right: 18,
-            width: 40,
-            height: 40,
-            bgcolor: "#ffffff",
-            border: "1px solid #d1d5db",
-            "&:hover": { bgcolor: "#ffffff" },
-          }}
-        >
-          <Icon icon="mdi:help-circle-outline" width={22} />
-        </IconButton>
+        {/* Close + Need Help buttons */}
+        <Box sx={{ position: "absolute", top: 18, right: 18, display: "flex", gap: 1, zIndex: 10 }}>
+          <Button
+            onClick={() => setHelpDialogOpen(true)}
+            variant="outlined"
+            sx={{
+              height: 40,
+              borderRadius: "20px",
+              textTransform: "none",
+              fontSize: 24,
+              fontWeight: 600,
+              color: "#2d5a3d",
+              borderColor: "#d1d5db",
+              bgcolor: "#ffffff",
+              px: 2,
+              "&:hover": { bgcolor: "#f0fdf4", borderColor: "#2d5a3d" },
+            }}
+          >
+            Need Help?
+          </Button>
+          {/* <IconButton
+            onClick={handleClose}
+            sx={{
+              width: 40,
+              height: 40,
+              bgcolor: "#ffffff",
+              border: "1px solid #d1d5db",
+              "&:hover": { bgcolor: "#f5f5f5" },
+            }}
+          >
+            <Icon icon="mdi:close" width={22} />
+          </IconButton> */}
+        </Box>
 
         {/* -------- LOGO -------- */}
         <Box sx={{ width: "100%", display: "flex", justifyContent: "center", mt: 2, mb: 2 }}>
@@ -656,10 +757,10 @@ export default function FeedbackPage() {
                 <DispenseReporter
                   active
                   user={{
-                    userId: (session?.user as any)?.id,
-                    name: (session?.user as any)?.name,
-                    email: (session?.user as any)?.email,
-                    phone: (session?.user as any)?.mobileNumber || (session?.user as any)?.phoneNumber || (session?.user as any)?.phone,
+                    userId: (session?.user as any)?.id || machineInfo?.machineId || "",
+                    name: (session?.user as any)?.name || `Walk-in – ${machineInfo?.machineName || "Vending Machine"}`,
+                    email: (session?.user as any)?.email || "",
+                    phone: (session?.user as any)?.mobileNumber || (session?.user as any)?.phoneNumber || (session?.user as any)?.phone || "",
                   }}
                   products={checkoutItems.map((item: any) => ({
                     id: item?.id, name: item?.name, quantity: item?.quantity,
@@ -692,10 +793,10 @@ export default function FeedbackPage() {
                   active
                   errorMessage={dispenseState.message}
                   user={{
-                    userId: (session?.user as any)?.id,
-                    name: (session?.user as any)?.name,
-                    email: (session?.user as any)?.email,
-                    phone: (session?.user as any)?.mobileNumber || (session?.user as any)?.phoneNumber || (session?.user as any)?.phone,
+                    userId: (session?.user as any)?.id || machineInfo?.machineId || "",
+                    name: (session?.user as any)?.name || `Walk-in – ${machineInfo?.machineName || "Vending Machine"}`,
+                    email: (session?.user as any)?.email || "",
+                    phone: (session?.user as any)?.mobileNumber || (session?.user as any)?.phoneNumber || (session?.user as any)?.phone || "",
                   }}
                   products={checkoutItems.map((item: any) => ({
                     id: item?.id, name: item?.name, quantity: item?.quantity,
@@ -738,6 +839,9 @@ export default function FeedbackPage() {
             emailFieldRef={emailFieldRef}
             onEditStart={() => {
               setIsEditingEmail(true);
+              setKeyboardTarget("email");
+              setIsKeyboardOpen(true);
+              setTimeout(() => { emailFieldRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }); }, 100);
             }}
             onEditConfirm={handleEmailEditConfirm}
             onSendEmail={handleSendEmail}

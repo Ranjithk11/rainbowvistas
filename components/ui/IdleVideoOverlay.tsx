@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Box, Typography } from "@mui/material";
 import { useRouter, usePathname } from "next/navigation";
+import { signOut } from "next-auth/react";
 import { APP_ROUTES } from "@/utils/routes";
 import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
 
@@ -14,7 +15,7 @@ type IdleVideoOverlayProps = {
 
 export default function IdleVideoOverlay({
   reIdleMs = 120_000,
-  src = "/videos/ranbowvistas.mp4",
+  src = "/videos/NewTHub.mp4",
 }: IdleVideoOverlayProps) {
   const router = useRouter();
   const pathname = usePathname();
@@ -51,7 +52,11 @@ export default function IdleVideoOverlay({
   // show it again after reIdleMs of inactivity.
   const arm = useCallback(() => {
     clearTimer();
-    timerRef.current = window.setTimeout(() => {
+    timerRef.current = window.setTimeout(async () => {
+      // Clear any stale session before showing idle screen
+      try {
+        await signOut({ redirect: false });
+      } catch {}
       setOpen(true);
     }, reIdleMs);
   }, [clearTimer, reIdleMs]);
@@ -179,15 +184,15 @@ export default function IdleVideoOverlay({
             fontWeight: 700,
             color: "white",
             textAlign: "center",
-            mb: 4,
+            mb: 2,
             textShadow: "0 2px 8px rgba(0,0,0,0.5)",
           }}
         >
-          Leafwater <span style={{ color: "#e4f009ff" }}>AI</span> Beauty Pod
+          Leafwater AI Beauty Pod
         </Typography>
         <Typography
           sx={{
-            fontSize:28,
+            fontSize: { xs: 24, md: 24 },
             color: "rgba(255,255,255,0.9)",
             textAlign: "center",
             mb: 5,
@@ -228,10 +233,10 @@ export default function IdleVideoOverlay({
           >
             <Typography
               sx={{
-                fontSize:34,
+                fontSize: { xs: 28, md: 28 },
                 fontWeight: 700,
                 color: "white",
-                mb: 2,
+                mb: 1.5,
                 textTransform: "uppercase",
                 letterSpacing: 1,
                 lineHeight: 1.2,
@@ -241,7 +246,7 @@ export default function IdleVideoOverlay({
             </Typography>
             <Typography
               sx={{
-                fontSize: 28,
+                fontSize: { xs: 24, md: 24 },
                 color: "rgba(255,255,255,0.9)",
                 mb: 2.5,
               }}
@@ -255,7 +260,7 @@ export default function IdleVideoOverlay({
                 gap: 1,
                 color: "white",
                 fontWeight: 600,
-                fontSize: 28,
+                fontSize: 24,
               }}
             >
               Start Scan <ArrowForwardIcon sx={{ fontSize: 20 }} />
@@ -283,10 +288,10 @@ export default function IdleVideoOverlay({
           >
             <Typography
               sx={{
-                fontSize: 34,
+                fontSize: { xs: 28, md: 28 },
                 fontWeight: 700,
                 color: "white",
-                mb: 2,
+                mb: 1.5,
                 textTransform: "uppercase",
                 letterSpacing: 1,
                 lineHeight: 1.2,
@@ -296,7 +301,7 @@ export default function IdleVideoOverlay({
             </Typography>
             <Typography
               sx={{
-                fontSize: 28,
+                fontSize: { xs: 24, md: 24 },
                 color: "rgba(255,255,255,0.9)",
                 mb: 2.5,
               }}
@@ -310,7 +315,7 @@ export default function IdleVideoOverlay({
                 gap: 1,
                 color: "white",
                 fontWeight: 600,
-                fontSize: 28,
+                fontSize: 24,
               }}
             >
               Shop Products <ArrowForwardIcon sx={{ fontSize: 20 }} />
