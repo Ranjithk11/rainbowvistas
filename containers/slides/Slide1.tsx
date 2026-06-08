@@ -1,10 +1,17 @@
 "use client";
 
-import { useState } from "react";
-import { Box, Typography, TextField } from "@mui/material";
-import { MuiTelInput, matchIsValidTel } from "mui-tel-input";
+import { useState, useRef, useLayoutEffect } from "react";
+import { Box, Typography, IconButton, InputAdornment } from "@mui/material";
+import VisibilityOutlinedIcon from "@mui/icons-material/VisibilityOutlined";
+import VisibilityOffOutlinedIcon from "@mui/icons-material/VisibilityOffOutlined";
+import { MuiTelInput } from "mui-tel-input";
 import PageBackground from "@/components/ui/PageBackground";
 import { VirtualKeyboard } from "@/components/ui";
+import {
+  maskPhoneDigits,
+  shouldAcceptPhoneValue,
+  validatePhone,
+} from "@/utils/phoneValidation";
 
 interface Slide1Props {
   name: string;
@@ -48,6 +55,35 @@ export default function Slide1({
   validationError,
 }: Slide1Props) {
   const [phoneError, setPhoneError] = useState<string>("");
+  const [showPhone, setShowPhone] = useState(false);
+  const phoneFieldRef = useRef<HTMLDivElement>(null);
+  const [maskOverlay, setMaskOverlay] = useState({ left: 0, top: 0, height: 0 });
+  const [maskedOverlayText, setMaskedOverlayText] = useState("");
+
+  useLayoutEffect(() => {
+    if (showPhone) return;
+    const container = phoneFieldRef.current;
+    const input = container?.querySelector<HTMLInputElement>(".MuiOutlinedInput-input");
+    if (!container || !input) return;
+
+    const containerRect = container.getBoundingClientRect();
+    const inputRect = input.getBoundingClientRect();
+    setMaskOverlay({
+      left: inputRect.left - containerRect.left,
+      top: inputRect.top - containerRect.top,
+      height: inputRect.height,
+    });
+
+    // Match overlay to formatted input text (spaces included) so caret aligns
+    setMaskedOverlayText(maskPhoneDigits(input.value));
+
+    const end = input.value.length;
+    try {
+      input.setSelectionRange(end, end);
+    } catch {
+      // ignore if input not focusable
+    }
+  }, [showPhone, phone, country, callingCode, activeField]);
 
   return (
     <Box
@@ -109,7 +145,7 @@ export default function Slide1({
               onClick={() => {
                 setActiveField("name");
                 setIsNumeric(false);
-                setCursorPosition(null); // Set cursor to end when clicking
+                setCursorPosition(null);
               }}
               sx={{
                 display: "flex",
@@ -157,13 +193,31 @@ export default function Slide1({
 
             {/* Phone Number Field */}
             <Typography sx={{ color: "#000", fontSize: "36px", mb: 0 }}>Phone Number</Typography>
+            <Box ref={phoneFieldRef} sx={{ position: "relative", width: "100%" }}>
             <MuiTelInput
               key={country}
+              fullWidth
               value={phone}
+              InputProps={{
+                endAdornment: (
+                  <InputAdornment position="end">
+                    <IconButton
+                      aria-label={showPhone ? "Hide phone number" : "Show phone number"}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => setShowPhone((prev) => !prev)}
+                      edge="end"
+                      sx={{ color: "#6b7280", p: 1 }}
+                    >
+                      {showPhone ? (
+                        <VisibilityOffOutlinedIcon sx={{ fontSize: 32 }} />
+                      ) : (
+                        <VisibilityOutlinedIcon sx={{ fontSize: 32 }} />
+                      )}
+                    </IconButton>
+                  </InputAdornment>
+                ),
+              }}
               onChange={(value, info) => {
-                // Use country-specific validation
-                // Different countries have different phone number lengths
-                // India: 10 digits, US: 10 digits, UK: 10-11 digits, etc.
                 const nationalNumber = info.nationalNumber || '';
                 const countryCode = info.countryCallingCode || '';
                 const iso2 = (info as any)?.countryCode;
@@ -179,43 +233,46 @@ export default function Slide1({
                   setCallingCode(countryCode);
                 }
 
-                // If the user just switched countries and hasn't entered a national number yet,
-                // force the value to the selected calling code to avoid showing the previous country flag/calling code.
                 if (didCountryChange) {
                   if (!nationalNumber) {
                     setPhone(countryCode ? `+${countryCode}` : value);
                     return;
                   }
-
-                  // Country changed with existing digits; always accept the new formatted value.
-                  setPhone(value);
+                  if (shouldAcceptPhoneValue(nationalNumber, nextCountry)) {
+                    setPhone(value);
+                  }
                   return;
                 }
-                
-                // Define max lengths per country code
-                const maxLengthByCountry: { [key: string]: number } = {
-                  '91': 10,  // India
-                  '1': 10,   // US/Canada
-                  '44': 11,  // UK
-                  '61': 9,   // Australia
-                  '86': 11,  // China
-                };
-                
-                const maxLength = maxLengthByCountry[countryCode] || 15; // Default to 15 for unknown countries
-                
-                if (nationalNumber.length <= maxLength) {
-                  setPhone(value);
+
+                if (!shouldAcceptPhoneValue(nationalNumber, nextCountry)) {
+                  return;
                 }
+
+                setPhone(value);
+                setPhoneError("");
               }}
               defaultCountry={country as any}
               focusOnSelectCountry
               forceCallingCode
-              onFocus={() => {
+              onFocus={(e) => {
                 setActiveField("phone");
                 setIsNumeric(true);
+                if (!showPhone) {
+                  const input = e.target as HTMLInputElement;
+                  const end = input.value.length;
+                  requestAnimationFrame(() => {
+                    try {
+                      input.setSelectionRange(end, end);
+                    } catch {
+                      /* ignore */
+                    }
+                  });
+                }
               }}
               sx={{
+                width: "100%",
                 "& .MuiOutlinedInput-root": {
+                  width: "100%",
                   borderRadius: 2,
                   bgcolor: "white",
                   minHeight: "80px",
@@ -234,6 +291,11 @@ export default function Slide1({
                 "& .MuiOutlinedInput-input": {
                   py: "20px",
                   fontSize: "28px",
+                  ...(!showPhone && {
+                    color: "transparent",
+                    WebkitTextFillColor: "transparent",
+                    caretColor: "transparent",
+                  }),
                 },
                 "& .MuiTelInput-Flag": {
                   width: "36px",
@@ -249,6 +311,48 @@ export default function Slide1({
                 },
               }}
             />
+            {!showPhone && maskedOverlayText && (
+              <Box
+                aria-hidden
+                sx={{
+                  position: "absolute",
+                  left: maskOverlay.left,
+                  top: maskOverlay.top,
+                  height: maskOverlay.height,
+                  display: "flex",
+                  alignItems: "center",
+                  pointerEvents: "none",
+                  zIndex: 2,
+                  fontSize: "28px",
+                  color: "#1a1a1a",
+                  lineHeight: 1,
+                  overflow: "hidden",
+                  whiteSpace: "nowrap",
+                  maxWidth: `calc(100% - ${maskOverlay.left}px - 72px)`,
+                }}
+              >
+                <Box component="span">{maskedOverlayText}</Box>
+                {activeField === "phone" && (
+                  <Box
+                    component="span"
+                    sx={{
+                      display: "inline-block",
+                      width: "2px",
+                      height: "28px",
+                      bgcolor: "#2d5a3d",
+                      ml: 0.25,
+                      flexShrink: 0,
+                      animation: "phoneMaskBlink 1s step-end infinite",
+                      "@keyframes phoneMaskBlink": {
+                        "0%, 100%": { opacity: 1 },
+                        "50%": { opacity: 0 },
+                      },
+                    }}
+                  />
+                )}
+              </Box>
+            )}
+            </Box>
 
             {/* Email Field */}
             <Typography sx={{ color: "#000", fontSize: "36px", mb: 0 }}>Email (Optional) </Typography>
@@ -256,7 +360,7 @@ export default function Slide1({
               onClick={() => {
                 setActiveField("email");
                 setIsNumeric(false);
-                setCursorPosition(null); // Set cursor to end when clicking
+                setCursorPosition(null);
               }}
               sx={{
                 display: "flex",
@@ -325,8 +429,9 @@ export default function Slide1({
             marginTop: "auto",
           }}
           onClick={() => {
-            if (!matchIsValidTel(phone)) {
-              setPhoneError("Please enter a valid phone number");
+            const error = validatePhone(phone, country, callingCode);
+            if (error) {
+              setPhoneError(error);
               return;
             }
 

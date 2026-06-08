@@ -24,6 +24,7 @@ interface NewProductCardProps {
   skinType?: string;
   quantity?: number;
   shopifyUrl?: string;
+  slotId?: number;
 }
 
 const NewProductCard = ({
@@ -42,6 +43,7 @@ const NewProductCard = ({
   skinType,
   quantity,
   shopifyUrl,
+  slotId,
 }: NewProductCardProps) => {
   const { addItem } = useCart();
   const { speakMessage } = useVoiceMessages();
@@ -60,7 +62,9 @@ const NewProductCard = ({
       setIsAdding(false);
       // Fetch price comparison from Google Sheet via API
       setPriceComparison(null);
-      fetch(`/api/price-comparison?product=${encodeURIComponent(name)}`)
+      const params = new URLSearchParams({ product: name });
+      if (id) params.set("productId", String(id).replace(/^products\//, ""));
+      fetch(`/api/price-comparison?${params.toString()}`)
         .then((res) => res.json())
         .then((data) => {
           if (data.success && data.match) {
@@ -72,7 +76,7 @@ const NewProductCard = ({
         })
         .catch(() => {});
     }
-  }, [open, name]);
+  }, [open, name, id]);
 
   const discountedPrice = useMemo(() => {
     if (!discountValue || isNaN(discountValue)) return retailPrice;
@@ -101,6 +105,7 @@ const NewProductCard = ({
       originalPrice: retailPrice,
       discountValue,
       quantity: 1,
+      slotId,
     });
     speakMessage("addToCart");
     setShowSuccess(true);

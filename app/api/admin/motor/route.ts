@@ -187,16 +187,60 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // REOPEN is not implemented in current STM32 firmware. The RQ<slot> dispense sequence
-    // already opens the door, holds it for 15s, and closes it automatically. We keep this
-    // endpoint responding OK so existing UI buttons don't error out.
+    // Handle REOPEN command - reopens the tray door
     if (command === "REOPEN") {
-      return NextResponse.json({
-        success: true,
-        message: "REOPEN is handled automatically by the dispense sequence (no-op)",
-        response: "no-op",
-        rawLines: ["[INFO] REOPEN ignored: firmware's RQ sequence already opens/closes the door"],
-      });
+      if (cfg.mock) {
+        console.log("[STM32 Mock] Simulating REOPEN command");
+        return NextResponse.json({
+          success: true,
+          message: "Reopen command sent (mock)",
+          response: "REOPEN complete",
+          rawLines: [
+            "[MOCK] REOPEN command received",
+            "[MOCK] Opening dispensing door",
+            "[MOCK] Door opened. Waiting 10 seconds...",
+            "[MOCK] Closing dispensing door",
+            "[MOCK] REOPEN complete",
+            "[MOCK] 200",
+          ],
+        });
+      }
+
+      try {
+        const result = await stm32Dispense(cfg, "REOPEN", {
+          commandPrefix: "",
+          okPattern: /REOPEN complete|^200$/i,
+          errorPattern: /error|fail|invalid/i,
+        });
+
+        if (result.errorLine && !result.okLine) {
+          return NextResponse.json(
+            {
+              success: false,
+              message: `STM32 error: ${result.errorLine}`,
+              rawLines: result.rawLines,
+            },
+            { status: 500 }
+          );
+        }
+
+        return NextResponse.json({
+          success: true,
+          message: "Reopen command sent",
+          response: result.okLine || "REOPEN complete",
+          rawLines: result.rawLines,
+        });
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        console.error("[STM32] Reopen error:", error);
+        return NextResponse.json(
+          {
+            success: false,
+            message: error.message,
+          },
+          { status: 500 }
+        );
+      }
     }
 
     // Handle generic DISPENSE command (no slot selected).

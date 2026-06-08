@@ -34,7 +34,7 @@ import { useAppSelector } from "@/redux/store/store";
 import Image from "next/image";
 import { ArrowBack } from "@mui/icons-material";
 import { useVoiceMessages, useVoice } from "@/contexts/VoiceContext";
-import { sendScanCompletedWebhook, getMachineLocation } from "@/utils/webhook";
+import { sendScanCompletedWebhook } from "@/utils/webhook";
 
 // Friendly progressive-message loader shown while AI analysis is in progress.
 const ANALYSIS_MESSAGES = [
@@ -790,18 +790,36 @@ const TakeSelfie = () => {
 
                   // Notify external automation (Make.com) about scan completion
                   const sessUser = session?.user as any;
-                  getMachineLocation().then((machineLocation) => {
-                    void sendScanCompletedWebhook({
-                      name: sessUser?.name as string,
-                      email: sessUser?.email as string,
-                      phone: (sessUser?.mobileNumber ||
-                        sessUser?.phoneNumber ||
-                        sessUser?.phone) as string,
-                      userId: resolvedUserId,
-                      machineName: process.env.NEXT_PUBLIC_MACHINE_NAME || "Vending Machine",
-                      machineLocation,
+
+                  fetch("/api/admin/machine-name")
+                    .then(res => res.json())
+                    .then(data => {
+                      if (data.success) {
+                        void sendScanCompletedWebhook({
+                          name: sessUser?.name as string,
+                          email: sessUser?.email as string,
+                          phone: (sessUser?.mobileNumber ||
+                            sessUser?.phoneNumber ||
+                            sessUser?.phone) as string,
+                          userId: resolvedUserId,
+                          machineName: data.machineName || process.env.NEXT_PUBLIC_MACHINE_NAME || "Vending Machine",
+                          machineLocation: data.machineLocation || process.env.NEXT_PUBLIC_MACHINE_LOCATION || "LeafWater Vending Machine",
+                        });
+                      }
+                    })
+                    .catch(err => {
+                      console.error("[TakeSelfie] Failed to fetch machine settings:", err);
+                      void sendScanCompletedWebhook({
+                        name: sessUser?.name as string,
+                        email: sessUser?.email as string,
+                        phone: (sessUser?.mobileNumber ||
+                          sessUser?.phoneNumber ||
+                          sessUser?.phone) as string,
+                        userId: resolvedUserId,
+                        machineName: process.env.NEXT_PUBLIC_MACHINE_NAME || "Vending Machine",
+                        machineLocation: process.env.NEXT_PUBLIC_MACHINE_LOCATION || "LeafWater Vending Machine",
+                      });
                     });
-                  });
                 }
               })
               .catch((error) => {

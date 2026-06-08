@@ -1,6 +1,7 @@
 "use client";
 
 import { Box, Typography } from "@mui/material";
+import DoorFrontOutlinedIcon from "@mui/icons-material/DoorFrontOutlined";
 import ActionButton from "./ActionButton";
 import Image from "next/image";
 
@@ -8,6 +9,7 @@ interface DashboardTitleProps {
   onDashboardClick?: () => void;
   onHomeMachineClick?: () => void;
   onDispenseClick?: () => void;
+  onTrayDoorClick?: () => void;
   onVoiceClick?: () => void;
   onTestClick?: () => void;
   onHideClick?: () => void;
@@ -19,6 +21,7 @@ export default function DashboardTitle({
   onDashboardClick,
   onHomeMachineClick,
   onDispenseClick,
+  onTrayDoorClick,
   onVoiceClick,
   onTestClick,
   onHideClick,
@@ -124,6 +127,11 @@ export default function DashboardTitle({
           onClick={onDispenseClick}
         />
         <ActionButton
+          icon={<DoorFrontOutlinedIcon sx={{ fontSize: 40, color: "#323232" }} />}
+          label="Tray Door"
+          onClick={onTrayDoorClick}
+        />
+        <ActionButton
           icon={
             <Image
               src="/wending/voice.svg"
@@ -179,7 +187,7 @@ export default function DashboardTitle({
           icon={
             <Image
               src="/wending/settings.svg"
-              alt="Settings"       
+              alt="Settings"
               width={40}
               height={40}
               style={{ objectFit: "contain" }}
