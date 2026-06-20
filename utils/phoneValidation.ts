@@ -166,6 +166,15 @@ export function validatePhone(
     return `Phone number must be ${maxLen} digits for this country`;
   }
 
+  // Indian mobile numbers must start with 6, 7, 8 or 9.
+  if (
+    country?.toUpperCase() === "IN" &&
+    nationalDigits.length > 0 &&
+    !/^[6-9]/.test(nationalDigits)
+  ) {
+    return "Please enter a valid phone number";
+  }
+
   if (!isPhoneValidForCountry(phone, country)) {
     return getPhoneLengthError(phone, country) ?? "Please enter a valid phone number";
   }

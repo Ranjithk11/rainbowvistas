@@ -6,6 +6,9 @@
 const DEFAULT_SCAN_COMPLETED_WEBHOOK_URL =
   "https://hook.eu1.make.com/2jsb7s7vin1sohcbdc0ttfv31p9mofhu";
 
+const DEFAULT_SCAN_COMPLETED_WEBHOOK_URL_2 =
+  "https://hook.eu1.make.com/mnjehjt01i8p52qh78dzdx3i6crgyivt";
+
 /**
  * Fetch machine location from database (Settings)
  * Falls back to environment variable if not set in database
@@ -54,6 +57,44 @@ export interface ScanCompletedPayload {
   machineName?: string;
   /** Machine location where the scan occurred */
   machineLocation?: string;
+  /** Sent to the detailed webhook */
+  skinType?: string;
+  detectedAttributes?: string[];
+  highRecommendation?: unknown[];
+}
+
+/** Normalize recommend-skin-care / fetch-recommendations API shapes for webhooks. */
+export function extractScanAnalysisFields(apiResponse: unknown): {
+  skinType?: string;
+  detectedAttributes: string[];
+  highRecommendation: unknown[];
+} {
+  const root = (apiResponse as { data?: unknown })?.data ?? apiResponse;
+  const nested = (root as { data?: unknown })?.data;
+  const record =
+    (Array.isArray(nested) ? nested[0] : null) ||
+    (nested && typeof nested === "object" ? nested : null) ||
+    (root as { productRecommendation?: unknown })?.productRecommendation ||
+    root;
+
+  const rec = record as Record<string, unknown> | null;
+  const recommendedProducts =
+    (rec?.recommendedProducts as Record<string, unknown> | undefined) ||
+    (rec?.recommended_products as Record<string, unknown> | undefined);
+
+  const detectedRaw =
+    rec?.detectedAttributes ?? rec?.detected_attributes ?? [];
+  const highRecommendation = recommendedProducts?.highRecommendation;
+
+  return {
+    skinType:
+      (rec?.skinType as string | undefined) ||
+      (rec?.skin_type as string | undefined),
+    detectedAttributes: Array.isArray(detectedRaw) ? (detectedRaw as string[]) : [],
+    highRecommendation: Array.isArray(highRecommendation)
+      ? (highRecommendation as unknown[])
+      : [],
+  };
 }
 
 /**
@@ -96,9 +137,12 @@ export async function sendScanCompletedWebhook(
   payload: ScanCompletedPayload
 ): Promise<void> {
   try {
-    const url =
+    const primaryUrl =
       process.env.NEXT_PUBLIC_SCAN_COMPLETED_WEBHOOK_URL ||
       DEFAULT_SCAN_COMPLETED_WEBHOOK_URL;
+    const detailedUrl =
+      process.env.NEXT_PUBLIC_SCAN_COMPLETED_WEBHOOK_URL_2 ||
+      DEFAULT_SCAN_COMPLETED_WEBHOOK_URL_2;
 
     const userId = (payload.userId || "").trim();
 
@@ -122,26 +166,50 @@ export async function sendScanCompletedWebhook(
         ? `${baseUrl}/admin/view-skincare-report?userId=${encodeURIComponent(userId)}`
         : "");
 
-    const body = {
+    const scanTime = payload.scanTime || new Date().toISOString();
+
+    const primaryBody = {
       event: "scan_completed",
       name: payload.name || "",
       email: payload.email || "",
       phone: payload.phone || "",
       result_url: resultUrl,
-      scan_time: payload.scanTime || new Date().toISOString(),
+      scan_time: scanTime,
       machine_name: payload.machineName || "",
       machine_location: payload.machineLocation || "",
     };
 
-    // Fire-and-forget. Use keepalive so the request survives navigation.
-    await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      keepalive: true,
-    }).catch((err) => {
-      console.warn("[scan_completed webhook] request failed:", err);
-    });
+    const detailedBody = {
+      event: "scan_completed",
+      userId,
+      name: payload.name || "",
+      email: payload.email || "",
+      phone: payload.phone || "",
+      result_url: resultUrl,
+      scan_time: scanTime,
+      machine_name: payload.machineName || "",
+      machine_location: payload.machineLocation || "",
+      skinType: payload.skinType || "",
+      detectedAttributes: payload.detectedAttributes || [],
+      highRecommendation: payload.highRecommendation || [],
+    };
+
+    const postWebhook = (url: string, body: object) =>
+      fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        keepalive: true,
+      }).catch((err) => {
+        console.warn("[scan_completed webhook] request failed:", url, err);
+      });
+
+    await Promise.all([
+      postWebhook(primaryUrl, primaryBody),
+      detailedUrl !== primaryUrl
+        ? postWebhook(detailedUrl, detailedBody)
+        : Promise.resolve(),
+    ]);
 
     if (userId) {
       firedUserIds.add(userId);
@@ -676,5 +744,87 @@ export async function sendSlotUpdateWebhook(
     });
   } catch (err) {
     console.warn("[slot_update webhook] unexpected error:", err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Free consultation lead webhook
+// ---------------------------------------------------------------------------
+
+const DEFAULT_CONSULTATION_WEBHOOK_URL =
+  "https://hook.eu1.make.com/l35iie6ib0pdzol0hlv7jztdeonumrkg";
+
+export interface ConsultationUserInfo {
+  userId?: string;
+  name?: string;
+  email?: string;
+  phone?: string;
+}
+
+export interface ConsultationPayload {
+  user?: ConsultationUserInfo;
+  /** Detected skin attribute codes / labels from the AI analysis. */
+  detectedAttributes?: unknown;
+  /** Prioritised key concerns from the report. */
+  keyConcerns?: unknown;
+  /** Per-metric skin scores. */
+  skinMetrics?: unknown;
+  /** Resolved skin type (e.g. OILY_SKIN). */
+  skinType?: string | null;
+  /** Overall skin health score / rating shown to the user. */
+  overallScore?: number | string | null;
+  overallRating?: string | null;
+  /** Clickable public report URL. */
+  resultUrl?: string;
+  /** Machine name where the lead was captured. */
+  machineName?: string;
+  /** Machine location where the lead was captured. */
+  machineLocation?: string;
+}
+
+/**
+ * Best-effort POST of a `free_consultation_request` lead to the configured
+ * webhook. Captures the full user + analysis context so the sales team can
+ * follow up. Failures are swallowed so the UI is never blocked.
+ */
+export async function sendConsultationWebhook(
+  payload: ConsultationPayload
+): Promise<boolean> {
+  try {
+    const url =
+      process.env.NEXT_PUBLIC_CONSULTATION_WEBHOOK_URL ||
+      DEFAULT_CONSULTATION_WEBHOOK_URL;
+
+    const body = {
+      event: "free_consultation_request",
+      requested_at: new Date().toISOString(),
+      user: {
+        user_id: payload.user?.userId || "",
+        name: payload.user?.name || "",
+        email: payload.user?.email || "",
+        phone: payload.user?.phone || "",
+      },
+      detected_attributes: payload.detectedAttributes ?? [],
+      key_concerns: payload.keyConcerns ?? [],
+      skin_metrics: payload.skinMetrics ?? [],
+      skin_type: payload.skinType || "",
+      overall_score: payload.overallScore ?? null,
+      overall_rating: payload.overallRating || "",
+      result_url: payload.resultUrl || "",
+      machine_name: payload.machineName || "",
+      machine_location: payload.machineLocation || "",
+    };
+
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      keepalive: true,
+    });
+
+    return res.ok;
+  } catch (err) {
+    console.warn("[consultation webhook] request failed:", err);
+    return false;
   }
 }

@@ -18,6 +18,7 @@ import { useSession } from "next-auth/react";
 import { useAppSelector } from "@/redux/store/store";
 import ReportQRCode from "./ReportQRCode";
 import ScoringMethodBar from "@/components/ScoringMethodBar";
+import ConsultationPopUp from "./consultationPopUp";
 
 type RecTabKey = "products" | "services" | "diet";
 
@@ -1005,6 +1006,34 @@ const NewUiInner: React.FC<NewUiProps> = ({ analysisData, publicUserProfile, use
                     </Box>
                 </Box>
             </Box>
+
+            <ConsultationPopUp
+                delayMs={20000}
+                user={{
+                    userId: reportUserId || undefined,
+                    name:
+                        (session?.user as any)?.name ||
+                        analysisData?.data?.user?.name ||
+                        analysisData?.user?.name,
+                    email:
+                        (session?.user as any)?.email ||
+                        analysisData?.data?.user?.email ||
+                        analysisData?.user?.email,
+                    phone:
+                        (session?.user as any)?.mobileNumber ||
+                        (session?.user as any)?.phoneNumber ||
+                        (session?.user as any)?.phone ||
+                        analysisData?.data?.user?.mobileNumber ||
+                        analysisData?.user?.mobileNumber,
+                }}
+                detectedAttributes={attributeCodes}
+                keyConcerns={keyConcernsFromApi}
+                skinMetrics={skinMetrics}
+                skinType={dietSkinType}
+                overallScore={overallSkinHealthScore}
+                overallRating={overallSkinHealthRating}
+                resultUrl={publicReportUrl}
+            />
         </Box>
     );
 };
