@@ -1,1 +1,1 @@
-# skinska new updates
+# FIRST MACHINE SMALL SCREEN CODE WHICH WAS AT RAINBOW VISTA MACHINE  new updates
