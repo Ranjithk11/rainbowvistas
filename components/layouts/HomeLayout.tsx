@@ -137,7 +137,8 @@ const HomeLayout = ({ children }: HomeLayoutProps) => {
             <MenuIcon />
           </IconButton>
           <Box flexGrow={1}>
-            <img width={150} src="/logo/logo_gold_white.png" />
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img width={150} src="/logo/logo_gold_white.png" alt="Leaf Water" />
           </Box>
           <Box paddingRight="15px" display="flex" alignItems="center" gap={1}>
             <VoiceControl />

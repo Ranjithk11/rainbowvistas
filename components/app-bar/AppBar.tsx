@@ -20,7 +20,8 @@ const AppBarComponent = () => {
         <Container maxWidth="xl">
           <Toolbar disableGutters>
             <Box flexGrow={1}>
-              <img width={170} src={LOGO_URL} />
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img width={170} src={LOGO_URL} alt="Leaf Water" />
             </Box>
             <Box>
               {session?.user?.id && (

@@ -4,15 +4,29 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Box, Grid, Typography, useMediaQuery, useTheme } from "@mui/material";
 import ProductCard from "./ProductCard";
 import {
-  useGetProductCategoriesQuery,
-  useGetAllBrandsQuery,
-} from "@/redux/api/products";
+  buildSlotsMap,
+  getSlotDiscountMap,
+  getSlotInfoForProduct,
+  mergeCatalogWithSlotProducts,
+  normalizeProductDiscount,
+  productMatchesBrandFilter,
+  productMatchesCategoryFilter,
+  type SlotsMap,
+} from "@/lib/product-slot-utils";
+import {
+  fetchCatalogBrands,
+  fetchCatalogCategories,
+  fetchCategoryImages,
+  fetchBrandImages,
+  type CatalogBrand,
+  type CatalogCategory,
+} from "@/lib/catalog-metadata";
 
 type Props = {
   data: any;
 };
 
-const mapProductToCardProps = (product: any) => {
+const mapProductToCardProps = (product: any, slotDiscountMap?: Record<string, number>) => {
   const imageUrl =
     product?.images?.[0]?.url ||
     product?.image_url ||
@@ -36,7 +50,7 @@ const mapProductToCardProps = (product: any) => {
     images: imageUrl ? [{ url: imageUrl }] : [],
     shopifyUrl: product?.shopifyUrl || product?.shopify_url || "#buy",
     isShopifyAvailable: product?.isShopifyAvailable ?? product?.in_stock ?? true,
-    discount: product?.discount || null,
+    discount: normalizeProductDiscount(product, slotDiscountMap),
     category: product?.productCategory?.title || product?.category || "",
   };
 };
@@ -81,12 +95,30 @@ export default function VendingProducts({ data }: Props) {
   const theme = useTheme();
   const isDesktop = useMediaQuery(theme.breakpoints.up("md"));
 
-  // Fetch categories and brands from cloud API (same as /products page)
-  const { data: categoriesData } = useGetProductCategoriesQuery({});
-  const { data: brandsData } = useGetAllBrandsQuery({});
+  const [cloudCategories, setCloudCategories] = useState<CatalogCategory[]>([
+    { _id: "all", title: "All" },
+  ]);
+  const [cloudBrands, setCloudBrands] = useState<CatalogBrand[]>([]);
 
-  const cloudCategories = categoriesData?.data || [];
-  const cloudBrands = brandsData?.data || [];
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const [cats, brs, catImgs, brandImgs] = await Promise.all([
+        fetchCatalogCategories(),
+        fetchCatalogBrands(),
+        fetchCategoryImages(),
+        fetchBrandImages(),
+      ]);
+      if (cancelled) return;
+      setCloudCategories(cats);
+      setCloudBrands(brs);
+      setCategoryImages(catImgs);
+      setBrandImages(brandImgs);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // State for filters
   const [selectedCategory, setSelectedCategory] = useState("all");
@@ -94,7 +126,8 @@ export default function VendingProducts({ data }: Props) {
 
   // State for products and slots
   const [products, setProducts] = useState<any[]>([]);
-  const [slotsMap, setSlotsMap] = useState<Record<string, { slotNumbers: number[]; quantity: number }>>({});
+  const [rawSlotsData, setRawSlotsData] = useState<unknown>({});
+  const [slotsMap, setSlotsMap] = useState<SlotsMap>({});
   const [isLoading, setIsLoading] = useState(false);
 
   // State for category/brand images
@@ -104,14 +137,6 @@ export default function VendingProducts({ data }: Props) {
   // State for categories that have available products in vending machine
   const [availableCategoryIds, setAvailableCategoryIds] = useState<Set<string>>(new Set());
 
-  const normalizeProductId = (id: unknown) => {
-    const raw = String(id ?? "").trim();
-    if (!raw) return "";
-    const numericMatch = raw.match(/(\d{5,})\/?$/);
-    if (numericMatch?.[1]) return numericMatch[1];
-    return raw.replace(/^products\//, "");
-  };
-
   // Fetch slots on mount
   useEffect(() => {
     const fetchSlots = async () => {
@@ -119,35 +144,8 @@ export default function VendingProducts({ data }: Props) {
         const res = await fetch("/api/admin/slots");
         if (res.ok) {
           const slotsData = await res.json();
-          const map: Record<string, { slotNumbers: number[]; quantity: number }> = {};
-          const slotsArray = Array.isArray(slotsData) ? slotsData : Object.values(slotsData);
-
-          slotsArray.forEach((slot: any) => {
-            if (slot.product_id) {
-              const rawId = String(slot.product_id);
-              const cleanId = normalizeProductId(rawId);
-              const quantity = Number(slot.quantity || 0);
-
-              const update = (key: string) => {
-                if (!key) return;
-                const slotId = Number(slot.slot_id);
-                if (!Number.isFinite(slotId)) return;
-                const existing = map[key];
-                if (!existing) {
-                  map[key] = { slotNumbers: [slotId], quantity };
-                  return;
-                }
-                if (!existing.slotNumbers.includes(slotId)) {
-                  existing.slotNumbers = [...existing.slotNumbers, slotId].sort((a, b) => a - b);
-                }
-                existing.quantity = Number(existing.quantity || 0) + quantity;
-              };
-
-              update(rawId);
-              if (cleanId && cleanId !== rawId) update(cleanId);
-            }
-          });
-          setSlotsMap(map);
+          setRawSlotsData(slotsData);
+          setSlotsMap(buildSlotsMap(slotsData));
         }
       } catch (err) {
         console.warn("Failed to fetch slots:", err);
@@ -155,6 +153,50 @@ export default function VendingProducts({ data }: Props) {
     };
     fetchSlots();
   }, []);
+
+  const selectedBrandName = useMemo(() => {
+    if (selectedBrand === "all") return undefined;
+    return cloudBrands.find((b) => b._id === selectedBrand)?.name;
+  }, [selectedBrand, cloudBrands]);
+
+  const selectedCategoryTitle = useMemo(() => {
+    if (selectedCategory === "all") return undefined;
+    return cloudCategories.find((c) => c._id === selectedCategory)?.title;
+  }, [selectedCategory, cloudCategories]);
+
+  const catalogFilters = useMemo(
+    () => ({
+      brandId: selectedBrand !== "all" ? selectedBrand : undefined,
+      brandName: selectedBrandName,
+      categoryId: selectedCategory !== "all" ? selectedCategory : undefined,
+      categoryTitle: selectedCategoryTitle,
+    }),
+    [selectedBrand, selectedBrandName, selectedCategory, selectedCategoryTitle]
+  );
+
+  const machineProducts = useMemo(
+    () => mergeCatalogWithSlotProducts(products, rawSlotsData, { catalogFilters }),
+    [products, rawSlotsData, catalogFilters]
+  );
+
+  const slotDiscountMap = useMemo(() => getSlotDiscountMap(rawSlotsData), [rawSlotsData]);
+
+  const isAllBrandName = (name: unknown) => {
+    const n = String(name ?? "").trim().toLowerCase();
+    return n === "all" || n === "all brands";
+  };
+
+  const sortedBrands = useMemo(
+    () =>
+      [...cloudBrands]
+        .filter((brand: any) => brand?._id && !isAllBrandName(brand?.name))
+        .sort((a: any, b: any) =>
+          String(a?.name ?? "").localeCompare(String(b?.name ?? ""), undefined, {
+            sensitivity: "base",
+          })
+        ),
+    [cloudBrands]
+  );
 
   // Check which categories have available products in vending machine
   useEffect(() => {
@@ -183,11 +225,9 @@ export default function VendingProducts({ data }: Props) {
           const catProducts = data?.data?.[0]?.products || [];
 
           // Check if any product in this category is available in vending machine
-          const hasAvailable = catProducts.some((p: any) => {
-            const productId = p?._id || p?.id;
-            const slotInfo = slotsMap[String(productId)] || slotsMap[normalizeProductId(productId)];
-            return slotInfo && slotInfo.quantity > 0;
-          });
+          const hasAvailable = catProducts.some((p: any) =>
+            (getSlotInfoForProduct(p, slotsMap)?.quantity ?? 0) > 0
+          );
 
           if (hasAvailable) {
             availableIds.add(cat._id);
@@ -215,7 +255,7 @@ export default function VendingProducts({ data }: Props) {
         setIsLoading(true);
         const params = new URLSearchParams();
         params.set("page", "1");
-        params.set("limit", "100");
+        params.set("limit", "1000");
         params.set("hasBrand", "true");
         params.set("isShopifyAvailable", "true");
         if (selectedCategory !== "all") params.set("catId", selectedCategory);
@@ -243,99 +283,52 @@ export default function VendingProducts({ data }: Props) {
     return () => { cancelled = true; };
   }, [selectedCategory, selectedBrand]);
 
-  // Fetch category images
+  // Refresh icons when slot inventory loads/changes.
   useEffect(() => {
-    if (cloudCategories.length === 0) return;
-
-    const fetchCategoryImages = async () => {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-      const dbToken = process.env.NEXT_PUBLIC_DB_TOKEN || "";
-
-      const fetchPromises = cloudCategories
-        .filter((cat: any) => cat._id !== "all")
-        .map(async (cat: any) => {
-          try {
-            const res = await fetch(
-              `${apiUrl}/product/fetch-by-filter?catId=${cat._id}&limit=1&isShopifyAvailable=true&hasBrand=true`,
-              { headers: { "x-db-token": dbToken } }
-            );
-            const data = await res.json();
-            return { catId: cat._id, imgUrl: data?.data?.[0]?.products?.[0]?.images?.[0]?.url };
-          } catch {
-            return { catId: cat._id, imgUrl: undefined };
-          }
-        });
-
-      const results = await Promise.all(fetchPromises);
-      const images: Record<string, string | undefined> = {};
-      results.forEach(({ catId, imgUrl }) => {
-        if (imgUrl) images[catId] = imgUrl;
-      });
-      setCategoryImages(images);
+    if (Object.keys(slotsMap).length === 0) return;
+    let cancelled = false;
+    void (async () => {
+      const [catImgs, brandImgs] = await Promise.all([
+        fetchCategoryImages(),
+        fetchBrandImages(),
+      ]);
+      if (cancelled) return;
+      setCategoryImages((prev) => ({ ...prev, ...catImgs }));
+      setBrandImages((prev) => ({ ...prev, ...brandImgs }));
+    })();
+    return () => {
+      cancelled = true;
     };
-
-    fetchCategoryImages();
-  }, [cloudCategories]);
-
-  // Fetch brand images
-  useEffect(() => {
-    if (cloudBrands.length === 0) return;
-
-    const fetchBrandImages = async () => {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-      const dbToken = process.env.NEXT_PUBLIC_DB_TOKEN || "";
-      if (!apiUrl) return;
-
-      const fetchPromises = cloudBrands
-        .filter((b: any) => b?._id && b._id !== "all")
-        .map(async (b: any) => {
-          try {
-            const res = await fetch(
-              `${apiUrl}/product/fetch-by-filter?brandId=${b._id}&limit=1&isShopifyAvailable=true&hasBrand=true`,
-              { headers: { "x-db-token": dbToken } }
-            );
-            const data = await res.json();
-            return { brandId: b._id, imgUrl: data?.data?.[0]?.products?.[0]?.images?.[0]?.url };
-          } catch {
-            return { brandId: b._id, imgUrl: undefined };
-          }
-        });
-
-      const results = await Promise.all(fetchPromises);
-      const images: Record<string, string | undefined> = {};
-      results.forEach(({ brandId, imgUrl }) => {
-        if (imgUrl) images[brandId] = imgUrl;
-      });
-      setBrandImages(images);
-    };
-
-    fetchBrandImages();
-  }, [cloudBrands]);
+  }, [slotsMap]);
 
   // Sort products - available first, then by quantity
   const sortedProducts = useMemo(() => {
-    const getSlotInfo = (p: any) => {
-      const productId = p?.id ?? p?._id;
-      return slotsMap[String(productId)] || slotsMap[normalizeProductId(productId)];
-    };
-
-    const decorated = products.map((product: any) => {
-      const slotInfo = getSlotInfo(product);
-      const isAvailable = slotInfo ? slotInfo.quantity > 0 : false;
+    const decorated = machineProducts.map((product: any) => {
+      const slotInfo = getSlotInfoForProduct(product, slotsMap);
       const quantity = slotInfo?.quantity ?? 0;
-      return { product, slotInfo, isAvailable, quantity };
+      return { product, slotInfo, isAvailable: quantity > 0, quantity };
     });
 
-    // Filter to show only available products
-    const availableOnly = decorated.filter((item) => item.isAvailable);
-
-    availableOnly.sort((a, b) => {
-      if (a.quantity !== b.quantity) return b.quantity - a.quantity;
-      return String(a.product?.name ?? "").localeCompare(String(b.product?.name ?? ""));
-    });
-
-    return availableOnly;
-  }, [products, slotsMap]);
+    return decorated
+      .filter(
+        (item) =>
+          productMatchesCategoryFilter(
+            item.product,
+            selectedCategory,
+            selectedCategoryTitle
+          ) &&
+          productMatchesBrandFilter(item.product, selectedBrand, selectedBrandName)
+      )
+      .sort((a, b) => {
+        if (a.isAvailable !== b.isAvailable) return a.isAvailable ? -1 : 1;
+        if (a.isAvailable && b.isAvailable && a.quantity !== b.quantity) {
+          return b.quantity - a.quantity;
+        }
+        return String(a.product?.name ?? "").localeCompare(String(b.product?.name ?? ""), undefined, {
+          sensitivity: "base",
+        });
+      });
+  }, [machineProducts, slotsMap, selectedBrand, selectedBrandName, selectedCategory, selectedCategoryTitle]);
 
   // Process personalized recommendations from cloud API (data prop)
   // Group by category, show up to 4 products per category (minimum 2 if available)
@@ -356,13 +349,13 @@ export default function VendingProducts({ data }: Props) {
           if (id && !seenIds.has(id)) {
             seenIds.add(id);
             // Check if available in vending machine
-            const slotInfo = slotsMap[String(id)] || slotsMap[normalizeProductId(id)];
-            if (slotInfo && slotInfo.quantity > 0) {
+            const slotInfo = getSlotInfoForProduct(p, slotsMap);
+            if ((slotInfo?.quantity ?? 0) > 0) {
               availableProducts.push({
                 product: p,
                 slotInfo,
                 isAvailable: true,
-                quantity: slotInfo.quantity,
+                quantity: slotInfo!.quantity,
                 category: categoryTitle,
               });
             }
@@ -410,7 +403,7 @@ export default function VendingProducts({ data }: Props) {
                   {catGroup.products.map((row: any, idx: number) => {
                     const product = row?.product;
                     const slotInfo = row?.slotInfo;
-                    const mappedProduct = mapProductToCardProps(product);
+                    const mappedProduct = mapProductToCardProps(product, slotDiscountMap);
                     const productQty = slotInfo?.quantity ?? 0;
                     return (
                       <Grid item xs={6} md={3} key={`personalized-${String(mappedProduct._id)}-${idx}`} sx={{ display: "flex", justifyContent: "center" }}>
@@ -492,45 +485,117 @@ export default function VendingProducts({ data }: Props) {
         </Box>
 
         {/* Brand Filter */}
-        {/* <Typography sx={{ fontSize: 24, color: "#9A9A9A", fontWeight: 400, letterSpacing: 1, textTransform: "uppercase" }}>
+        <Typography sx={{ fontSize: 24, color: "#9A9A9A", fontWeight: 400, letterSpacing: 1, textTransform: "uppercase", mt: 1 }}>
           BRAND FILTER
         </Typography>
-        <Box sx={{ display: "flex", gap: 2, overflowX: "auto", py: 2, "&::-webkit-scrollbar": { display: "none" }, scrollbarWidth: "none" }}>
-          <Box onClick={() => setSelectedBrand("all")} sx={{ flex: "0 0 auto", cursor: "pointer", textAlign: "center", minWidth: 80 }}>
-            <Box sx={{ width: { xs: 58, md: 86 }, height: { xs: 58, md: 86 }, borderRadius: "50%", mx: "auto", border: selectedBrand === "all" ? "2px solid #0f766e" : "2px solid #e5e7eb", bgcolor: "#ffffff", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <Box
+          sx={{
+            display: "flex",
+            gap: 2,
+            overflowX: "auto",
+            py: 2,
+            "&::-webkit-scrollbar": { display: "none" },
+            scrollbarWidth: "none",
+          }}
+        >
+          <Box
+            onClick={() => setSelectedBrand("all")}
+            sx={{ flex: "0 0 auto", cursor: "pointer", textAlign: "center", minWidth: 100 }}
+          >
+            <Box
+              sx={{
+                width: { xs: 58, md: 86 },
+                height: { xs: 58, md: 86 },
+                borderRadius: "50%",
+                mx: "auto",
+                border: selectedBrand === "all" ? "2px solid #0f766e" : "2px solid #e5e7eb",
+                bgcolor: "#ffffff",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
               <Typography sx={{ fontSize: 24, fontWeight: 600, color: "#0f766e" }}>All</Typography>
             </Box>
-            <Typography sx={{ mt: 0.75, fontSize: 18, color: "#000", fontWeight: selectedBrand === "all" ? 600 : 400, whiteSpace: "nowrap" }}>All Brands</Typography>
+            <Typography
+              sx={{
+                mt: 0.75,
+                fontSize: 18,
+                color: "#000",
+                fontWeight: selectedBrand === "all" ? 600 : 400,
+                whiteSpace: "nowrap",
+              }}
+            >
+              All Brands
+            </Typography>
           </Box>
-          {cloudBrands.filter((b: any) => b?._id && b._id !== "all").map((brand: any) => {
+          {sortedBrands.map((brand: any) => {
             const active = selectedBrand === brand._id;
             const brandImg = brandImages[brand._id];
             return (
-              <Box key={brand._id} onClick={() => setSelectedBrand(brand._id)} sx={{ flex: "0 0 auto", cursor: "pointer", textAlign: "center", minWidth: 80 }}>
-                <Box sx={{ width: { xs: 58, md: 86 }, height: { xs: 58, md: 86 }, borderRadius: "50%", mx: "auto", border: active ? "2px solid #0f766e" : "2px solid #e5e7eb", bgcolor: "#ffffff", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                  {brandImg ? <Box component="img" src={brandImg} alt={brand.name || "brand"} sx={{ width: "122px", height: "122px", objectFit: "contain" }} /> : null}
+              <Box
+                key={brand._id}
+                onClick={() => setSelectedBrand(brand._id)}
+                sx={{ flex: "0 0 auto", cursor: "pointer", textAlign: "center", minWidth: 100 }}
+              >
+                <Box
+                  sx={{
+                    width: { xs: 58, md: 86 },
+                    height: { xs: 58, md: 86 },
+                    borderRadius: "50%",
+                    mx: "auto",
+                    border: active ? "2px solid #0f766e" : "2px solid #e5e7eb",
+                    bgcolor: "#ffffff",
+                    overflow: "hidden",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                >
+                  {brandImg ? (
+                    <Box
+                      component="img"
+                      src={brandImg}
+                      alt={brand.name || "brand"}
+                      sx={{ width: "122px", height: "122px", objectFit: "contain" }}
+                    />
+                  ) : (
+                    <Typography sx={{ fontSize: 14, fontWeight: 600, color: "#0f766e", px: 1 }}>
+                      {String(brand.name || "").slice(0, 2).toUpperCase()}
+                    </Typography>
+                  )}
                 </Box>
-                <Typography sx={{ mt: 0.75, fontSize: 18, color: "#000", fontWeight: active ? 600 : 400, whiteSpace: "nowrap" }}>{brand.name}</Typography>
+                <Typography
+                  sx={{
+                    mt: 0.75,
+                    fontSize: 18,
+                    color: "#000",
+                    fontWeight: active ? 600 : 400,
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {brand.name}
+                </Typography>
               </Box>
             );
           })}
-        </Box> */}
+        </Box>
 
         {/* Products Grid - show all for "All" category, limit to 4 for others */}
         <Grid container spacing={{ xs: 1.5, md: 2 }} sx={{ mt: 2 }}>
           {sortedProducts.length === 0 ? (
             <Grid item xs={12}>
               <Typography sx={{ mt: 1.5, color: "#6b7280" }}>
-                {isLoading ? "Loading products..." : "No products available in vending machine for this selection."}
+                {isLoading ? "Loading products..." : "No products found for this selection."}
               </Typography>
             </Grid>
           ) : (
             (selectedCategory === "all" ? sortedProducts : sortedProducts.slice(0, 4)).map((row: any, idx: number) => {
               const product = row?.product;
               const slotInfo = row?.slotInfo;
-              const mappedProduct = mapProductToCardProps(product);
-              const productQty = slotInfo?.quantity ?? 0;
-              const isAvailable = slotInfo ? slotInfo.quantity > 0 : false;
+              const mappedProduct = mapProductToCardProps(product, slotDiscountMap);
+              const productQty = row?.quantity ?? slotInfo?.quantity ?? 0;
+              const isAvailable = row?.isAvailable ?? productQty > 0;
               return (
                 <Grid item xs={6} md={4} key={`product-${String(mappedProduct._id)}-${idx}`} sx={{ display: "flex", justifyContent: "center" }}>
                   <ProductCard
@@ -538,7 +603,7 @@ export default function VendingProducts({ data }: Props) {
                     enabledMask={false}
                     compact={false}
                     horizontalLayout={true}
-                    slotNumbers={slotInfo?.slotNumbers ?? null}
+                    slotNumbers={isAvailable ? (slotInfo?.slotNumbers ?? null) : null}
                     isAvailable={isAvailable}
                     quantity={productQty}
                     cardSx={{ width: "100%", ...(isDesktop ? { maxWidth: 700, minHeight: 380 } : { maxWidth: 700, height: 300 }) }}

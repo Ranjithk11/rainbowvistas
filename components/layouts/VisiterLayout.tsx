@@ -50,7 +50,8 @@ const VisiterLayout = ({ children }: VisiterLayoutProps) => {
       <AppBar color="primary" position="fixed" open={false}>
         <Toolbar>
           <Box mt={1} flexGrow={1}>
-            <img width={150} src="/logo/logo_gold_white.png" />
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img width={150} src="/logo/logo_gold_white.png" alt="Leaf Water" />
           </Box>
           {/* {visitCount && <Box>Visit Count: {visitCount}</Box>} */}
         </Toolbar>

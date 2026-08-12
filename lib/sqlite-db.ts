@@ -29,9 +29,297 @@ function dropRelationIfExists(name: string) {
     db.exec(`DROP TABLE IF EXISTS "${name}"`);
   }
 }
+function dedupeOrdersByColumn(column: "payment_id" | "razorpay_order_id"): number {
+  const duplicates = db
+    .prepare(
+      `
+      SELECT ${column} as dup_key
+      FROM orders
+      WHERE ${column} IS NOT NULL AND ${column} != ''
+      GROUP BY ${column}
+      HAVING COUNT(*) > 1
+    `
+    )
+    .all() as { dup_key: string }[];
+
+  if (duplicates.length === 0) return 0;
+
+  const selectIds = db.prepare(
+    `
+    SELECT id FROM orders
+    WHERE ${column} = ?
+    ORDER BY created_at ASC, rowid ASC
+  `
+  );
+  const deleteItems = db.prepare("DELETE FROM order_items WHERE order_id = ?");
+  const deleteOrder = db.prepare("DELETE FROM orders WHERE id = ?");
+
+  let removed = 0;
+  const removeDuplicates = db.transaction((keys: string[]) => {
+    for (const dupKey of keys) {
+      const ids = selectIds.all(dupKey) as { id: string }[];
+      for (const row of ids.slice(1)) {
+        deleteItems.run(row.id);
+        deleteOrder.run(row.id);
+        removed++;
+      }
+    }
+  });
+
+  removeDuplicates(duplicates.map((row) => row.dup_key));
+  if (removed > 0) {
+    console.log(`[SQLite] Removed ${removed} duplicate orders by ${column}`);
+  }
+  return removed;
+}
+
+function orderIdFromBillNumber(billNumber: string): string | null {
+  const match = billNumber.match(/(order_[A-Za-z0-9_-]+)/);
+  return match ? match[1] : null;
+}
+
+function deletePosiflyBillData(billNumber: string): void {
+  const run = db.transaction(() => {
+    db.prepare("DELETE FROM _posifly_item_data WHERE billNumber = ?").run(billNumber);
+    db.prepare("DELETE FROM _posifly_payment_data WHERE billNumber = ?").run(billNumber);
+    db.prepare("DELETE FROM _posifly_charges_data WHERE billNumber = ?").run(billNumber);
+    db.prepare("DELETE FROM _posifly_bill_data WHERE billNumber = ?").run(billNumber);
+  });
+  run();
+}
+
+function cleanupOrphanPosiflyBills(): number {
+  const bills = db
+    .prepare("SELECT billNumber FROM _posifly_bill_data")
+    .all() as { billNumber: string }[];
+  let removed = 0;
+  for (const { billNumber } of bills) {
+    const orderId = orderIdFromBillNumber(billNumber) || billNumber;
+    const order = db.prepare("SELECT id FROM orders WHERE id = ?").get(orderId);
+    if (!order) {
+      deletePosiflyBillData(billNumber);
+      removed++;
+    }
+  }
+  return removed;
+}
+
+function dedupePosiflyBillsBySaleSignature(): number {
+  const dupGroups = db
+    .prepare(
+      `
+      SELECT billDate, billTime, billValue, outletRefId
+      FROM _posifly_bill_data
+      GROUP BY billDate, billTime, billValue, outletRefId
+      HAVING COUNT(*) > 1
+    `
+    )
+    .all() as {
+    billDate: string;
+    billTime: string;
+    billValue: number;
+    outletRefId: string;
+  }[];
+
+  let removed = 0;
+  const selectBills = db.prepare(
+    `
+    SELECT billNumber FROM _posifly_bill_data
+    WHERE billDate = ? AND billTime = ? AND billValue = ? AND outletRefId = ?
+    ORDER BY rowid ASC
+  `
+  );
+
+  for (const group of dupGroups) {
+    const bills = selectBills.all(
+      group.billDate,
+      group.billTime,
+      group.billValue,
+      group.outletRefId
+    ) as { billNumber: string }[];
+    for (const row of bills.slice(1)) {
+      deletePosiflyBillData(row.billNumber);
+      removed++;
+    }
+  }
+  return removed;
+}
+
+function dedupeTransactionsByPaymentId(): number {
+  const duplicates = db
+    .prepare(
+      `
+      SELECT payment_id as dup_key
+      FROM transactions
+      WHERE payment_id IS NOT NULL AND payment_id != ''
+      GROUP BY payment_id
+      HAVING COUNT(*) > 1
+    `
+    )
+    .all() as { dup_key: string }[];
+
+  if (duplicates.length === 0) return 0;
+
+  const selectIds = db.prepare(
+    `
+    SELECT id FROM transactions
+    WHERE payment_id = ?
+    ORDER BY created_at ASC, rowid ASC
+  `
+  );
+  const deleteTxn = db.prepare("DELETE FROM transactions WHERE id = ?");
+
+  let removed = 0;
+  const removeDuplicates = db.transaction((keys: string[]) => {
+    for (const dupKey of keys) {
+      const ids = selectIds.all(dupKey) as { id: string }[];
+      for (const row of ids.slice(1)) {
+        deleteTxn.run(row.id);
+        removed++;
+      }
+    }
+  });
+
+  removeDuplicates(duplicates.map((row) => row.dup_key));
+  return removed;
+}
+
+export interface SalesDuplicatePreview {
+  duplicateOrderRows: { byPaymentId: number; byRazorpayOrderId: number };
+  orphanPosiflyBills: number;
+  duplicatePosiflyBillGroups: number;
+  duplicatePosiflyBillRows: number;
+  duplicateTransactionRows: number;
+}
+
+function countExtraOrderRows(column: "payment_id" | "razorpay_order_id"): number {
+  const row = db
+    .prepare(
+      `
+      SELECT COALESCE(SUM(cnt - 1), 0) as extra
+      FROM (
+        SELECT COUNT(*) as cnt
+        FROM orders
+        WHERE ${column} IS NOT NULL AND ${column} != ''
+        GROUP BY ${column}
+        HAVING COUNT(*) > 1
+      )
+    `
+    )
+    .get() as { extra: number };
+  return row?.extra ?? 0;
+}
+
+function countOrphanPosiflyBills(): number {
+  const bills = db
+    .prepare("SELECT billNumber FROM _posifly_bill_data")
+    .all() as { billNumber: string }[];
+  let count = 0;
+  for (const { billNumber } of bills) {
+    const orderId = orderIdFromBillNumber(billNumber) || billNumber;
+    const order = db.prepare("SELECT id FROM orders WHERE id = ?").get(orderId);
+    if (!order) count++;
+  }
+  return count;
+}
+
+export interface SalesDedupeResult extends SalesDuplicatePreview {
+  removed: {
+    ordersByPaymentId: number;
+    ordersByRazorpayOrderId: number;
+    orphanPosiflyBills: number;
+    duplicatePosiflyBills: number;
+    transactionsByPaymentId: number;
+  };
+}
+
+function previewSalesDuplicates(): SalesDuplicatePreview {
+  const orphanPosiflyBills = countOrphanPosiflyBills();
+
+  const posiflyDupStats = db
+    .prepare(
+      `
+      SELECT
+        COUNT(*) as duplicate_posifly_bill_groups,
+        COALESCE(SUM(cnt - 1), 0) as duplicate_posifly_bill_rows
+      FROM (
+        SELECT COUNT(*) as cnt
+        FROM _posifly_bill_data
+        GROUP BY billDate, billTime, billValue, outletRefId
+        HAVING COUNT(*) > 1
+      )
+    `
+    )
+    .get() as {
+    duplicate_posifly_bill_groups: number;
+    duplicate_posifly_bill_rows: number;
+  };
+
+  const duplicateTransactionRows = (
+    db
+      .prepare(
+        `
+        SELECT COALESCE(SUM(cnt - 1), 0) as extra
+        FROM (
+          SELECT COUNT(*) as cnt
+          FROM transactions
+          WHERE payment_id IS NOT NULL AND payment_id != ''
+          GROUP BY payment_id
+          HAVING COUNT(*) > 1
+        )
+      `
+      )
+      .get() as { extra: number }
+  ).extra;
+
+  return {
+    duplicateOrderRows: {
+      byPaymentId: countExtraOrderRows("payment_id"),
+      byRazorpayOrderId: countExtraOrderRows("razorpay_order_id"),
+    },
+    orphanPosiflyBills,
+    duplicatePosiflyBillGroups: posiflyDupStats.duplicate_posifly_bill_groups ?? 0,
+    duplicatePosiflyBillRows: posiflyDupStats.duplicate_posifly_bill_rows ?? 0,
+    duplicateTransactionRows,
+  };
+}
+
+function ensureOrderIdempotencyIndexes() {
+  dedupeOrdersByColumn("payment_id");
+  dedupeOrdersByColumn("razorpay_order_id");
+
+  try {
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_payment_id_unique
+        ON orders(payment_id)
+        WHERE payment_id IS NOT NULL AND payment_id != ''
+    `);
+  } catch (err: any) {
+    console.warn(
+      "[SQLite] Could not create payment_id unique index:",
+      err?.message || err
+    );
+  }
+
+  try {
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_razorpay_order_id_unique
+        ON orders(razorpay_order_id)
+        WHERE razorpay_order_id IS NOT NULL AND razorpay_order_id != ''
+    `);
+  } catch (err: any) {
+    console.warn(
+      "[SQLite] Could not create razorpay_order_id unique index:",
+      err?.message || err
+    );
+  }
+}
 
 // Initialize database tables
+let dbInitialized = false;
 function initDb() {
+  if (dbInitialized) return;
+  dbInitialized = true;
   // Orders table - main sales records
   db.exec(`
     CREATE TABLE IF NOT EXISTS orders (
@@ -238,6 +526,19 @@ function initDb() {
       created_at TEXT DEFAULT (datetime('now')),
       FOREIGN KEY (user_id) REFERENCES users(id)
     )
+  `);
+
+  // Stable invoice numbers per payment/order (LW/MM/YY/NNN).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS invoice_allocations (
+      source_key TEXT PRIMARY KEY,
+      invoice_no TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    )
+  `);
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_invoice_allocations_invoice_no
+      ON invoice_allocations(invoice_no)
   `);
 
   // Settings table - additional settings
@@ -978,6 +1279,48 @@ export const sqliteDb = {
     return this.getProductOverride(productId)!;
   },
 
+  updateSlotsRetailPriceForProduct(productId: string, retailPrice: number, productName?: string): void {
+    const searchId = String(productId).replace(/^products\//, '');
+    const lastUpdated = new Date().toISOString();
+
+    db.prepare(`
+      UPDATE vending_slots
+      SET retail_price = ?, last_updated = ?
+      WHERE product_id = ? OR product_id = ? OR product_id = ?
+    `).run(retailPrice, lastUpdated, searchId, `products/${searchId}`, String(productId));
+
+    if (productName) {
+      const exactName = productName.toUpperCase().trim();
+      db.prepare(`
+        UPDATE vending_slots
+        SET retail_price = ?, last_updated = ?
+        WHERE UPPER(TRIM(product_name)) = ?
+      `).run(retailPrice, lastUpdated, exactName);
+    }
+  },
+
+  syncProductInventoryFromSlots(productId: string, productName?: string): number {
+    const cleanId = String(productId).replace(/^products\//, '');
+    const totalQuantity = this.getTotalQuantityForProduct(cleanId);
+    const updatedAt = new Date().toISOString();
+
+    const existing = this.getProductOverride(cleanId);
+    if (existing) {
+      db.prepare(`
+        UPDATE product_overrides
+        SET quantity = ?, updated_at = ?
+        WHERE id = ?
+      `).run(totalQuantity, updatedAt, cleanId);
+    } else if (totalQuantity > 0) {
+      db.prepare(`
+        INSERT INTO product_overrides (id, name, quantity, updated_at)
+        VALUES (?, ?, ?, ?)
+      `).run(cleanId, productName ?? null, totalQuantity, updatedAt);
+    }
+
+    return totalQuantity;
+  },
+
   getProductOverride(productId: string): ProductOverride | undefined {
     const row = db.prepare('SELECT * FROM product_overrides WHERE id = ?').get(productId) as any;
     if (!row) return undefined;
@@ -1271,6 +1614,80 @@ export const sqliteDb = {
 
   setMachineLocation(location: string): boolean {
     return this.setSetting('machine_location', location, 'Machine physical location');
+  },
+
+  /**
+   * Allocate a unique tax-invoice number for a payment/order.
+   * Format: LW/MM/YY/NNN (monthly sequence, 3+ digits).
+   * Idempotent for the same source keys (orderId / paymentId / qrCodeId).
+   */
+  allocateInvoiceNo(sourceKeys: string | string[]): string {
+    const keys = (Array.isArray(sourceKeys) ? sourceKeys : [sourceKeys])
+      .map((k) => String(k || "").trim())
+      .filter(Boolean);
+    const uniqueKeys = Array.from(new Set(keys));
+    if (uniqueKeys.length === 0) {
+      uniqueKeys.push(
+        `anon_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+      );
+    }
+
+    const run = db.transaction(() => {
+      for (const key of uniqueKeys) {
+        const existing = db
+          .prepare(
+            `SELECT invoice_no FROM invoice_allocations WHERE source_key = ?`
+          )
+          .get(key) as { invoice_no: string } | undefined;
+        if (existing?.invoice_no) {
+          const insertIgnore = db.prepare(`
+            INSERT OR IGNORE INTO invoice_allocations (source_key, invoice_no)
+            VALUES (?, ?)
+          `);
+          for (const k of uniqueKeys) {
+            insertIgnore.run(k, existing.invoice_no);
+          }
+          return existing.invoice_no;
+        }
+      }
+
+      const now = new Date();
+      const mm = String(now.getMonth() + 1).padStart(2, "0");
+      const yy = String(now.getFullYear()).slice(-2);
+      const counterKey = `invoice_seq_${yy}${mm}`;
+      const row = db
+        .prepare(
+          `SELECT setting_value FROM app_settings WHERE setting_key = ?`
+        )
+        .get(counterKey) as { setting_value: string } | undefined;
+      const next = (parseInt(row?.setting_value || "0", 10) || 0) + 1;
+      const nowIso = now.toISOString();
+
+      db.prepare(`
+        INSERT INTO app_settings (setting_key, setting_value, description, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(setting_key) DO UPDATE SET
+          setting_value = excluded.setting_value,
+          updated_at = excluded.updated_at
+      `).run(
+        counterKey,
+        String(next),
+        `Invoice sequence for ${mm}/${yy}`,
+        nowIso
+      );
+
+      const invoiceNo = `LW/${mm}/${yy}/${String(next).padStart(3, "0")}`;
+      const insert = db.prepare(`
+        INSERT INTO invoice_allocations (source_key, invoice_no)
+        VALUES (?, ?)
+      `);
+      for (const k of uniqueKeys) {
+        insert.run(k, invoiceNo);
+      }
+      return invoiceNo;
+    });
+
+    return run();
   },
 
   // ==================== CART ====================
@@ -1620,4 +2037,29 @@ export const sqliteDb = {
       charges_details: this.getPosiflyChargesByBill(bill.billNumber),
     }));
   },
-};
+  previewSalesDuplicates(): SalesDuplicatePreview {
+    return previewSalesDuplicates();
+  },
+
+  dedupeAllSalesData(): SalesDedupeResult {
+    const removedOrdersByPaymentId = dedupeOrdersByColumn("payment_id");
+    const removedOrdersByRazorpayOrderId = dedupeOrdersByColumn("razorpay_order_id");
+    const removedOrphanPosiflyBills = cleanupOrphanPosiflyBills();
+    const removedDuplicatePosiflyBills = dedupePosiflyBillsBySaleSignature();
+    const removedTransactions = dedupeTransactionsByPaymentId();
+    ensureOrderIdempotencyIndexes();
+
+    const result: SalesDedupeResult = {
+      ...previewSalesDuplicates(),
+      removed: {
+        ordersByPaymentId: removedOrdersByPaymentId,
+        ordersByRazorpayOrderId: removedOrdersByRazorpayOrderId,
+        orphanPosiflyBills: removedOrphanPosiflyBills,
+        duplicatePosiflyBills: removedDuplicatePosiflyBills,
+        transactionsByPaymentId: removedTransactions,
+      },
+    };
+
+    console.log("[SQLite] Sales dedupe complete:", result);
+    return result;
+  },};

@@ -1,46 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { sendAllSlotsUpdate, maybeDailyFullSync } from "@/lib/slot-webhook";
+
+export const dynamic = "force-dynamic";
 
 // Check if we're running on Vercel (serverless) or locally
 const IS_VERCEL = process.env.VERCEL === "1";
-
-// Flag to track if startup sync has been done
-let startupSyncDone = false;
-
-// Sync all slots to webhook on first server startup (for first-time deployment)
-async function performStartupSync() {
-  if (startupSyncDone || IS_VERCEL) {
-    return;
-  }
-
-  try {
-    const { adminDb } = await import("@/lib/admin-db");
-    const allSlots = adminDb.getAllSlots();
-
-    if (Object.keys(allSlots).length === 0) {
-      console.log("[startup sync] No slots to sync");
-      startupSyncDone = true;
-      return;
-    }
-
-    const slotsArray = Object.values(allSlots).map(slot => ({
-      slot_id: slot.slot_id,
-      product_id: slot.product_id,
-      product_name: slot.product_name,
-      category: slot.category,
-      retail_price: slot.retail_price,
-      discount_value: slot.discount_value,
-      image_url: slot.image_url,
-      quantity: slot.quantity,
-      last_updated: slot.last_updated,
-    }));
-
-    await sendSlotUpdateWebhook(slotsArray, undefined);
-    console.log(`[startup sync] Synced ${slotsArray.length} slots to webhook`);
-    startupSyncDone = true;
-  } catch (error) {
-    console.error("[startup sync] Error:", error);
-  }
-}
 
 // GET all vending slots
 export async function GET() {
@@ -52,38 +16,31 @@ export async function GET() {
 
     const { adminDb } = await import("@/lib/admin-db");
     const slots = adminDb.getAllSlots();
+    const overrides = adminDb.getAllProductOverrides();
 
-    // Perform startup sync on first GET request
-    if (!startupSyncDone) {
-      performStartupSync();
+    for (const slot of Object.values(slots)) {
+      if (!slot.product_id) continue;
+      const cleanId = String(slot.product_id).replace(/^products\//, "");
+      const override = overrides[cleanId] || overrides[String(slot.product_id)];
+      if (override?.retail_price !== undefined && override?.retail_price !== null) {
+        slot.retail_price = override.retail_price;
+      }
     }
 
-    return NextResponse.json(slots);
-  } catch (error) {
-    console.error("Error fetching slots:", error);
-    return NextResponse.json({});
-  }
-}
+    // Push the full slot map to the webhook once per calendar day. The machine
+    // polls this endpoint regularly, so this guarantees a daily sync even when
+    // nothing was changed. Fire-and-forget so it never delays the response.
+    maybeDailyFullSync();
 
-// Send webhook for slot updates
-async function sendSlotUpdateWebhook(slots: any[], affectedSlotId?: number) {
-  try {
-    const { sendSlotUpdateWebhook } = await import("@/utils/webhook");
-    const { sqliteDb } = await import("@/lib/sqlite-db");
-
-    const machineLocation = sqliteDb.getMachineLocation() || process.env.NEXT_PUBLIC_MACHINE_LOCATION || "LeafWater Vending Machine";
-    const machineName = sqliteDb.getMachineName() || process.env.NEXT_PUBLIC_MACHINE_NAME || "Vending Machine";
-
-    await sendSlotUpdateWebhook({
-      slots: slots,
-      updateType: 'slot_assignment',
-      affectedSlotIds: affectedSlotId ? [affectedSlotId] : [],
-      timestamp: new Date().toISOString(),
-      machineLocation,
-      machineName,
+    return NextResponse.json(slots, {
+      headers: { "Cache-Control": "no-store, no-cache, must-revalidate" },
     });
   } catch (error) {
-    console.error("[sendSlotUpdateWebhook] Error:", error);
+    console.error("Error fetching slots:", error);
+    return NextResponse.json(
+      { success: false, message: "Failed to load slots", error: String((error as Error)?.message || error) },
+      { status: 500 }
+    );
   }
 }
 
@@ -193,6 +150,16 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const parsedSlotId = parseInt(slot_id);
+    const existingSlot = adminDb.getSlot(parsedSlotId);
+    const previousProductId = existingSlot?.product_id ?? null;
+    const previousProductName = existingSlot?.product_name ?? undefined;
+
+    const parsedRetailPrice =
+      retail_price !== undefined && retail_price !== null && retail_price !== ""
+        ? parseFloat(String(retail_price))
+        : undefined;
+
     // Auto-fetch discount from API if not provided and product_id is given
     let finalDiscountValue = discount_value !== undefined && discount_value !== null && discount_value !== "" ? parseFloat(discount_value) : undefined;
 
@@ -215,13 +182,13 @@ export async function POST(request: NextRequest) {
     const productInfo = {
       name: product_name,
       category: category,
-      retail_price: retail_price ? parseFloat(retail_price) : undefined,
+      retail_price: parsedRetailPrice,
       image_url: image_url,
       discount_value: finalDiscountValue,
     };
 
     const slot = adminDb.assignProductToSlot(
-      parseInt(slot_id),
+      parsedSlotId,
       product_id ?? null,
       parseInt(quantity),
       productInfo
@@ -234,20 +201,24 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Send webhook with all slot information after assignment
-    const allSlots = adminDb.getAllSlots();
-    const slotsArray = Object.values(allSlots).map(slot => ({
-      slot_id: slot.slot_id,
-      product_id: slot.product_id,
-      product_name: slot.product_name,
-      category: slot.category,
-      retail_price: slot.retail_price,
-      discount_value: slot.discount_value,
-      image_url: slot.image_url,
-      quantity: slot.quantity,
-      last_updated: slot.last_updated,
-    }));
-    sendSlotUpdateWebhook(slotsArray, parseInt(slot_id));
+    const cleanProductId = product_id ? String(product_id).replace(/^products\//, '') : null;
+
+    if (cleanProductId) {
+      if (parsedRetailPrice !== undefined && !Number.isNaN(parsedRetailPrice)) {
+        adminDb.setProductOverride(cleanProductId, { retail_price: parsedRetailPrice });
+        adminDb.updateSlotsRetailPriceForProduct(cleanProductId, parsedRetailPrice, product_name);
+      }
+      adminDb.syncProductInventoryFromSlots(cleanProductId, product_name);
+    } else if (previousProductId) {
+      adminDb.syncProductInventoryFromSlots(String(previousProductId), previousProductName);
+    }
+
+    // Send webhook with all slot information after the change. A null product
+    // means the slot was cleared/removed; otherwise it's an assignment/edit.
+    sendAllSlotsUpdate(
+      [parsedSlotId],
+      product_id ? "slot_assignment" : "slot_removed"
+    );
 
     return NextResponse.json({
       success: true,
@@ -257,7 +228,11 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error("Error assigning product to slot:", error);
     return NextResponse.json(
-      { success: false, message: "Failed to assign product" },
+      {
+        success: false,
+        message: "Failed to assign product",
+        error: String((error as Error)?.message || error),
+      },
       { status: 500 }
     );
   }
@@ -278,26 +253,14 @@ export async function PATCH(request: NextRequest) {
     const { action } = body;
 
     if (action === "sync_webhook") {
-      // Get all slots and send to webhook
-      const allSlots = adminDb.getAllSlots();
-      const slotsArray = Object.values(allSlots).map(slot => ({
-        slot_id: slot.slot_id,
-        product_id: slot.product_id,
-        product_name: slot.product_name,
-        category: slot.category,
-        retail_price: slot.retail_price,
-        discount_value: slot.discount_value,
-        image_url: slot.image_url,
-        quantity: slot.quantity,
-        last_updated: slot.last_updated,
-      }));
-
-      await sendSlotUpdateWebhook(slotsArray, undefined);
+      // Manually push all slots to the webhook.
+      const count = Object.keys(adminDb.getAllSlots()).length;
+      await sendAllSlotsUpdate([], "manual_sync");
 
       return NextResponse.json({
         success: true,
         message: "All slots synced to webhook",
-        count: slotsArray.length,
+        count,
       });
     }
 

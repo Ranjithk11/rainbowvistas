@@ -14,6 +14,7 @@ type UpiQrPaymentProps = {
   onVerified?: (payload: {
     orderId: string;
     paymentId: string;
+    qrCodeId: string;
     signature: string;
     productId?: string;
   }) => void;
@@ -41,12 +42,15 @@ export default function UpiQrPayment({
 }: UpiQrPaymentProps) {
   const [isLoading, setIsLoading] = useState(false);
   const [showQR, setShowQR] = useState(false);
+  const [isCompleting, setIsCompleting] = useState(false);
   const [qrImageUrl, setQrImageUrl] = useState("");
   const [qrCodeId, setQrCodeId] = useState("");
   const [orderId, setOrderId] = useState("");
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
   const hasTriggered = useRef(false);
+  const verifiedRef = useRef(false);
+  const pollInFlightRef = useRef(false);
 
   const cleanup = useCallback(() => {
     if (pollingRef.current) clearInterval(pollingRef.current);
@@ -66,30 +70,74 @@ export default function UpiQrPayment({
   const startPolling = useCallback(
     (qrId: string, oId: string) => {
       cleanup();
+      verifiedRef.current = false;
+      pollInFlightRef.current = false;
+
+      const pollBody = {
+        qrCodeId: qrId,
+        ...(oId ? { orderId: oId } : {}),
+        mode,
+      };
 
       pollingRef.current = setInterval(async () => {
+        // Prevent overlapping polls (slow check-payment can outlive the 3s interval).
+        if (verifiedRef.current || pollInFlightRef.current) return;
+        pollInFlightRef.current = true;
+
         try {
           const res = await fetch("/api/razorpay/check-payment", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ qrCodeId: qrId, orderId: oId, mode }),
+            body: JSON.stringify(pollBody),
           });
           const data = await res.json();
 
           if (data.success && data.paid) {
+            let paymentId = data.paymentId || "";
+            let resolvedOrderId = data.orderId || oId;
+
+            if (!paymentId) {
+              try {
+                const retry = await fetch("/api/razorpay/check-payment", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(pollBody),
+                });
+                const retryData = await retry.json();
+                if (retryData.success) {
+                  paymentId = retryData.paymentId || "";
+                  resolvedOrderId = retryData.orderId || resolvedOrderId;
+                }
+              } catch (err) {
+                console.warn("[UpiQR] paymentId retry failed:", err);
+              }
+            }
+
+            // Keep polling until Razorpay exposes pay_xxx (QR payments need qrCodeId).
+            if (!paymentId) return;
+            if (verifiedRef.current) {
+              cleanup();
+              return;
+            }
+            // Claim before any further async work / parent callbacks.
+            verifiedRef.current = true;
+
             cleanup();
-            toast.success("Payment successful!");
+            setIsCompleting(true);
             setShowQR(false);
             setIsLoading(false);
             onVerified?.({
-              orderId: data.orderId || oId,
-              paymentId: data.paymentId || "",
+              orderId: resolvedOrderId,
+              paymentId,
+              qrCodeId: qrId,
               signature: "",
               productId,
             });
           }
         } catch (err) {
           console.error("[UpiQR] Poll error:", err);
+        } finally {
+          pollInFlightRef.current = false;
         }
       }, 3000);
 
@@ -106,16 +154,17 @@ export default function UpiQrPayment({
 
   const generateQR = useCallback(async () => {
     if (isLoading) return;
+    verifiedRef.current = false;
+
+    if (typeof amountPaise !== "number" || !Number.isFinite(amountPaise) || amountPaise <= 0) {
+      reportError("Invalid amount");
+      return;
+    }
+
     setIsLoading(true);
     onProcessingStart?.();
 
     try {
-      if (typeof amountPaise !== "number" || !Number.isFinite(amountPaise) || amountPaise <= 0) {
-        reportError("Invalid amount");
-        setIsLoading(false);
-        return;
-      }
-
       const res = await fetch("/api/razorpay/create-qr", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -164,8 +213,33 @@ export default function UpiQrPayment({
     cleanup();
     setShowQR(false);
     setIsLoading(false);
+    setIsCompleting(false);
     onError?.("Payment cancelled");
   };
+
+  if (isCompleting) {
+    return (
+      <Box
+        sx={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 3,
+          p: 4,
+          width: "100%",
+          maxWidth: 600,
+          mx: "auto",
+          minHeight: 400,
+        }}
+      >
+        <CircularProgress size={56} sx={{ color: "#316D52" }} />
+        <Typography sx={{ fontSize: 28, fontWeight: 600, color: "#111827" }}>
+          Processing your order...
+        </Typography>
+      </Box>
+    );
+  }
 
   if (showQR) {
     return (
@@ -191,8 +265,8 @@ export default function UpiQrPayment({
 
         <Box
           sx={{
-            width: "min(500px, 80vw)",
-            height: "min(500px, 80vw)",
+            width: 500,
+            height: 500,
             borderRadius: 3,
             overflow: "hidden",
             border: "3px solid #e5e7eb",
@@ -203,6 +277,7 @@ export default function UpiQrPayment({
           }}
         >
           {qrImageUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element -- Razorpay QR is a dynamic data URL
             <img
               src={qrImageUrl}
               alt="UPI QR Code"

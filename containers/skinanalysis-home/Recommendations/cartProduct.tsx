@@ -1,9 +1,8 @@
-import React, { useMemo, useState, useCallback, useEffect } from "react";
+import React, { useMemo, useState, useCallback, useEffect, useRef } from "react";
 import {
     Box,
     Button,
     CircularProgress,
-    Collapse,
     Dialog,
     Divider,
     IconButton,
@@ -15,33 +14,33 @@ import { Icon } from "@iconify/react";
 import { capitalizeWords } from "@/utils/func";
 import { useCart, CartItem } from "./CartContext";
 import UpiQrPayment from "@/components/payments/UpiQrPayment";
+import PaymentMethodChooser, { type PaymentMethod } from "@/components/payments/PaymentMethodChooser";
+import CashAgentPayment from "@/components/payments/CashAgentPayment";
 import { ProductPrice } from "./components";
 import { toast } from "react-toastify";
 import { useRouter } from "next/navigation";
-import CloseIcon from "@mui/icons-material/Close";
 import { APP_ROUTES } from "@/utils/routes";
 import { useVoiceMessages } from "@/contexts/VoiceContext";
-import { useSession } from "next-auth/react";
-import PaymentReporter from "@/app/feedback/components/PaymentReporter";
 import {
     clampCartQuantity,
     fetchMachineStockForProduct,
     getCartQuantityLimitMessage,
 } from "@/utils/cartQuantityLimits";
+import { useSpinWheel } from "@/contexts/SpinWheelContext";
+import {
+  isDeferredSpinReward,
+  isNextPurchaseSpinReward,
+} from "@/lib/spin-wheel/rewards";
+import { parsePrice } from "./cart/parsePrice";
+import ThubCouponSection from "./cart/ThubCouponSection";
+import SpinWheelRewardSection from "./cart/SpinWheelRewardSection";
+import CheckoutOrderReview from "./cart/CheckoutOrderReview";
+import CartToPayFooter from "./cart/CartToPayFooter";
 
 type CartProductProps = {
     open: boolean;
     onClose: () => void;
     onCheckout?: () => void;
-};
-
-const parsePrice = (priceText?: string): number => {
-    if (!priceText) return 0;
-    const normalized = String(priceText).replace(/,/g, " ");
-    const match = normalized.match(/(\d+(?:\.\d+)?)/);
-    if (!match) return 0;
-    const num = Number(match[1]);
-    return Number.isFinite(num) ? num : 0;
 };
 
 const CartProduct: React.FC<CartProductProps> = ({ open, onClose, onCheckout }) => {
@@ -50,18 +49,24 @@ const CartProduct: React.FC<CartProductProps> = ({ open, onClose, onCheckout }) 
     const isMobile = useMediaQuery(theme.breakpoints.down("sm"));
     const { items, setQuantity, removeItem, clear } = useCart();
     const { speakMessage } = useVoiceMessages();
-    const { data: session } = useSession();
     const [showPriceDetails, setShowPriceDetails] = useState(false);
     const [step, setStep] = useState<"cart" | "checkout" | "payment">("cart");
+    const [paymentMethod, setPaymentMethod] = useState<PaymentMethod | null>(null);
     const [couponApplied, setCouponApplied] = useState(false);
+    const [couponMessage, setCouponMessage] = useState("");
+    /** T Hub Exclusive Extra 5% — independent of spin-wheel rewards. */
+    const [thubCouponApplied, setThubCouponApplied] = useState(false);
+    const { reward: spinReward, validateForCart, markRewardRedeemed } = useSpinWheel();
     const [paymentMode, setPaymentMode] = useState<"test" | "live">("live");
     const [isDispensing, setIsDispensing] = useState(false);
-    const [paymentSuccess, setPaymentSuccess] = useState(false);
-    const [paymentPayload, setPaymentPayload] = useState<any>(null);
     const [machineLocation, setMachineLocation] = useState<string>("LeafWater Vending Machine");
     const [machineName, setMachineName] = useState<string>("Vending Machine");
+    const [machineId, setMachineId] = useState<string>("");
     const [stockByProduct, setStockByProduct] = useState<Record<string, number>>({});
     const [limitNotice, setLimitNotice] = useState({ open: false, message: "" });
+    const paymentRecordedRef = useRef<string | null>(null);
+    /** Ensures T-Hub 5% is defaulted once per checkout visit without blocking manual remove. */
+    const thubDefaultedForCheckoutRef = useRef(false);
 
     const cartItemKey = (item: CartItem) => item.id || item.name;
 
@@ -74,6 +79,7 @@ const CartProduct: React.FC<CartProductProps> = ({ open, onClose, onCheckout }) 
                 if (data.success) {
                     if (data.machineLocation) setMachineLocation(data.machineLocation);
                     if (data.machineName) setMachineName(data.machineName);
+                    if (data.machineId) setMachineId(data.machineId);
                 }
             } catch (error) {
                 console.error("[CartProduct] Failed to fetch machine settings:", error);
@@ -160,7 +166,10 @@ const CartProduct: React.FC<CartProductProps> = ({ open, onClose, onCheckout }) 
     );
 
     useEffect(() => {
-        if (!open) return;
+        if (!open) {
+            setThubCouponApplied(false);
+            return;
+        }
         if (step === "checkout") {
             speakMessage("checkoutTapCart");
             return;
@@ -281,11 +290,151 @@ const CartProduct: React.FC<CartProductProps> = ({ open, onClose, onCheckout }) 
         return Number.isFinite(sum) ? sum : 0;
     }, [items]);
 
+    const spinValidation = useMemo(() => validateForCart(total), [validateForCart, total]);
+
+    const isNextPurchaseOnly = isNextPurchaseSpinReward(spinReward);
+    const isDeferredOnly = isDeferredSpinReward(spinReward);
+
+    const spinDiscount = useMemo(() => {
+      if (!couponApplied) return 0;
+      // Hard block: next-visit / birthday rewards never reduce payable total.
+      if (isDeferredOnly || isNextPurchaseOnly) return 0;
+      if (!spinValidation.canApply) return 0;
+      if (spinValidation.reason === "next_purchase_only" || spinValidation.reason === "birthday_only") {
+        return 0;
+      }
+      return Math.max(0, Number(spinValidation.discount) || 0);
+    }, [
+      couponApplied,
+      isDeferredOnly,
+      isNextPurchaseOnly,
+      spinValidation.canApply,
+      spinValidation.discount,
+      spinValidation.reason,
+    ]);
+
+    // T-Hub default 5% — no minimum order value (MOV applies to spin-wheel only).
+    const thubDiscount = useMemo(() => {
+      if (!thubCouponApplied) return 0;
+      if (!Number.isFinite(total) || total <= 0) return 0;
+      return Math.round(total * 0.05);
+    }, [thubCouponApplied, total]);
+
+    /**
+     * T-Hub scenario: use EITHER default T-Hub 5% OR a spin-wheel cart offer — never both.
+     * Spin-wheel MOV / eligibility still gates spinDiscount only.
+     */
     const discount = useMemo(() => {
-        if (!couponApplied) return 0;
-        if (!Number.isFinite(total) || total <= 0) return 0;
-        return Math.round(total * 0.05);
-    }, [couponApplied, total]);
+      if (spinDiscount > 0) return Math.min(Math.max(0, total), spinDiscount);
+      if (thubDiscount > 0) return Math.min(Math.max(0, total), thubDiscount);
+      return 0;
+    }, [total, spinDiscount, thubDiscount]);
+
+    // Keep spin validation message in sync; never auto-apply spin (user chooses vs T-Hub).
+    useEffect(() => {
+        if (!open || step !== "checkout") return;
+
+        if (!spinReward || spinReward.redeemed) {
+            setCouponApplied(false);
+            setCouponMessage("");
+            return;
+        }
+
+        const validation = validateForCart(total);
+        setCouponMessage(validation.message);
+
+        if (
+          isDeferredSpinReward(spinReward) ||
+          isNextPurchaseSpinReward(spinReward) ||
+          !validation.canApply ||
+          validation.reason === "next_purchase_only" ||
+          validation.reason === "birthday_only"
+        ) {
+            setCouponApplied(false);
+        }
+    }, [open, step, spinReward, total, validateForCart]);
+
+    // Default T-Hub 5% once when entering checkout (unless a spin cart offer is already active).
+    useEffect(() => {
+        if (!open) {
+            setThubCouponApplied(false);
+            thubDefaultedForCheckoutRef.current = false;
+            return;
+        }
+        if (step !== "checkout") {
+            thubDefaultedForCheckoutRef.current = false;
+            return;
+        }
+        if (thubDefaultedForCheckoutRef.current) return;
+        thubDefaultedForCheckoutRef.current = true;
+        if (spinDiscount <= 0) {
+            setThubCouponApplied(true);
+        }
+    }, [open, step, spinDiscount]);
+
+    // If user applies a spin cart discount, always clear T-Hub (mutual exclusivity).
+    useEffect(() => {
+        if (spinDiscount > 0 && thubCouponApplied) {
+            setThubCouponApplied(false);
+        }
+    }, [spinDiscount, thubCouponApplied]);
+
+    const handleApplySpinCoupon = useCallback(() => {
+        if (!spinReward) {
+            toast.info("Spin the wheel first to win a reward.");
+            return;
+        }
+
+        if (isDeferredSpinReward(spinReward) || isNextPurchaseSpinReward(spinReward)) {
+            const validation = validateForCart(total);
+            setCouponMessage(validation.message);
+            setCouponApplied(false);
+            toast.info(validation.message);
+            return;
+        }
+
+        const validation = validateForCart(total);
+        setCouponMessage(validation.message);
+
+        if (!validation.canApply) {
+            toast.info(validation.message);
+            setCouponApplied(false);
+            return;
+        }
+
+        // Mutual exclusivity: spin-wheel offer replaces T-Hub 5%.
+        setThubCouponApplied(false);
+        setCouponApplied(true);
+        toast.success(
+          `${validation.message} T Hub 5% was removed — only one offer can be used.`
+        );
+    }, [spinReward, total, validateForCart]);
+
+    const handleRemoveSpinCoupon = useCallback(() => {
+        setCouponApplied(false);
+        setCouponMessage("");
+        // Restore T-Hub default when spin offer is removed.
+        setThubCouponApplied(true);
+    }, []);
+
+    const handleApplyThubCoupon = useCallback(() => {
+        // Mutual exclusivity: T-Hub 5% replaces any applied spin-wheel cart discount.
+        setCouponApplied(false);
+        setThubCouponApplied(true);
+        toast.success("T Hub Extra 5% discount applied. Spin-wheel offer was removed.");
+    }, []);
+
+    const handleRemoveThubCoupon = useCallback(() => {
+        setThubCouponApplied(false);
+    }, []);
+
+    const handleToggleThubCoupon = useCallback(() => {
+        if (thubCouponApplied) {
+            setThubCouponApplied(false);
+            return;
+        }
+        handleApplyThubCoupon();
+    }, [thubCouponApplied, handleApplyThubCoupon]);
 
     const payableTotal = useMemo(() => {
         const next = total - discount;
@@ -293,12 +442,17 @@ const CartProduct: React.FC<CartProductProps> = ({ open, onClose, onCheckout }) 
     }, [total, discount]);
 
     const amountPaise = useMemo(() => {
-        const amount = couponApplied ? payableTotal : total;
+        const amount = discount > 0 ? payableTotal : total;
         return Math.max(0, Math.round(amount * 100));
-    }, [payableTotal, couponApplied, total]);
+    }, [payableTotal, total, discount]);
 
     const handleBack = () => {
         if (step === "payment") {
+            // If a method is chosen, step back to the method chooser first.
+            if (paymentMethod) {
+                setPaymentMethod(null);
+                return;
+            }
             setStep("checkout");
             return;
         }
@@ -308,6 +462,127 @@ const CartProduct: React.FC<CartProductProps> = ({ open, onClose, onCheckout }) 
         }
         onClose();
     };
+
+    // Cash payment: agent already validated in CashAgentPayment. Record the sale
+    // and hand off to the feedback page which performs the dispense (same path as
+    // UPI). The agent name + amount + method="cash" travel in the checkout summary
+    // so the dispense-success webhook can include them.
+    const handleCashConfirmed = useCallback(
+        async (auth: { agentName: string; method?: "qr" | "password"; staff?: { hash?: string; role?: string; branch?: string; phone?: string } } | string) => {
+            const agentName = typeof auth === "string" ? auth : auth.agentName;
+            const staffAuthMethod = typeof auth === "string" ? "password" : auth.method;
+            const staff = typeof auth === "string" ? undefined : auth.staff;
+
+            const txnId = `CASH-${Date.now()}`;
+            if (paymentRecordedRef.current === txnId) return;
+
+            if (typeof window !== "undefined") {
+                const storageKey = `kiosk_order_recorded::${txnId}`;
+                if (window.sessionStorage.getItem(storageKey)) return;
+                window.sessionStorage.setItem(storageKey, "1");
+            }
+            paymentRecordedRef.current = txnId;
+
+            const itemsToDispense = [...items];
+            const amount = payableTotal;
+
+            const cashPayment = {
+                orderId: txnId,
+                paymentId: txnId,
+                amount,
+                currency: "INR",
+                status: "paid",
+                method: "cash",
+                agentName,
+                staffAuthMethod,
+                staffHash: staff?.hash,
+                staffRole: staff?.role,
+                staffBranch: staff?.branch,
+                staffPhone: staff?.phone,
+                machineId,
+                machineName,
+                machineLocation,
+            };
+
+            if (spinDiscount > 0 && spinReward && !spinReward.redeemed) {
+                markRewardRedeemed();
+            }
+
+            if (typeof window !== "undefined") {
+                try {
+                    window.sessionStorage.setItem(
+                        "kiosk_checkout_summary",
+                        JSON.stringify({
+                            items: itemsToDispense,
+                            total,
+                            discount,
+                            payableTotal,
+                            couponApplied,
+                            spinWheelReward: spinReward,
+                            createdAt: Date.now(),
+                            payment: cashPayment,
+                        })
+                    );
+                } catch {
+                }
+            }
+
+            router.push(APP_ROUTES.FEEDBACK);
+
+            void (async () => {
+                try {
+                    const orderItems = itemsToDispense.map((item) => ({
+                        productId: item.id || "",
+                        productName: item.name,
+                        quantity: item.quantity || 1,
+                        price: parsePrice(item.priceText),
+                        slotId: item.slotId,
+                    }));
+
+                    const orderResponse = await fetch("/api/admin/orders", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            items: orderItems,
+                            totalAmount: amount,
+                            paymentId: txnId,
+                            razorpayOrderId: txnId,
+                            paymentMode: "cash",
+                        }),
+                    });
+                    const orderData = await orderResponse.json();
+
+                    await fetch("/api/admin/transactions", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            transactionId: txnId,
+                            amount,
+                            paymentId: txnId,
+                            status: "completed",
+                        }),
+                    }).catch((err) => console.warn("[CashPayment] Failed to record transaction:", err));
+
+                    await fetch("/api/posifly/bills", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            orderId: orderData?.order?.id || txnId,
+                            items: orderItems,
+                            totalAmount: amount,
+                            discountAmount: discount,
+                            paymentId: txnId,
+                            razorpayOrderId: txnId,
+                            paymentMode: "cash",
+                        }),
+                    }).catch((err) => console.warn("[CashPayment] Failed to save POSIFLY bill:", err));
+                } catch (err) {
+                    console.error("[CashPayment] Failed to record order:", err);
+                }
+            })();
+        },
+        [items, payableTotal, total, discount, spinDiscount, machineId, machineName, machineLocation, router, spinReward, markRewardRedeemed]
+    );
 
     return (
         <>
@@ -451,6 +726,7 @@ const CartProduct: React.FC<CartProductProps> = ({ open, onClose, onCheckout }) 
                                 <Button
                                     variant="contained"
                                     onClick={() => {
+                                        setPaymentMethod(null);
                                         setStep("payment");
                                         speakMessage('payment');
                                     }}
@@ -485,6 +761,21 @@ const CartProduct: React.FC<CartProductProps> = ({ open, onClose, onCheckout }) 
                                     py: 4,
                                 }}
                             >
+                                {paymentMethod === null ? (
+                                    <PaymentMethodChooser
+                                        amount={discount > 0 ? payableTotal : total}
+                                        onSelect={(m) => {
+                                            setPaymentMethod(m);
+                                            speakMessage("payment");
+                                        }}
+                                    />
+                                ) : paymentMethod === "cash" ? (
+                                    <CashAgentPayment
+                                        amount={discount > 0 ? payableTotal : total}
+                                        onBack={() => setPaymentMethod(null)}
+                                        onConfirmed={handleCashConfirmed}
+                                    />
+                                ) : (
                                 <UpiQrPayment
                                     amountPaise={amountPaise}
                                     currency="INR"
@@ -495,19 +786,35 @@ const CartProduct: React.FC<CartProductProps> = ({ open, onClose, onCheckout }) 
                                         speakMessage("paymentProcessing");
                                     }}
                                     onVerified={async (payload) => {
+                                        const dedupeKey =
+                                            payload?.paymentId ||
+                                            payload?.qrCodeId ||
+                                            payload?.orderId ||
+                                            "";
+                                        if (!dedupeKey) return;
+
+                                        // Claim synchronously before any await (prevents double record).
+                                        if (paymentRecordedRef.current) {
+                                            console.log("[Payment] Duplicate onVerified ignored:", dedupeKey);
+                                            return;
+                                        }
+                                        paymentRecordedRef.current = dedupeKey;
+
+                                        if (typeof window !== "undefined") {
+                                            const storageKey = `kiosk_order_recorded::${dedupeKey}`;
+                                            if (window.sessionStorage.getItem(storageKey)) {
+                                                console.log("[Payment] Duplicate onVerified ignored (session):", dedupeKey);
+                                                return;
+                                            }
+                                            window.sessionStorage.setItem(storageKey, "1");
+                                        }
+
                                         console.log("[Payment] onVerified called, items:", items, "payload:", payload);
                                         const itemsToDispense = [...items];
 
-                                        // Trigger payment webhook
-                                        setPaymentSuccess(true);
-                                        setPaymentPayload({
-                                            orderId: payload?.orderId,
-                                            paymentId: payload?.paymentId,
-                                            amount: payableTotal,
-                                            currency: "INR",
-                                            status: "paid",
-                                            method: paymentMode,
-                                        });
+                                        if (spinDiscount > 0 && spinReward && !spinReward.redeemed) {
+                                            markRewardRedeemed();
+                                        }
 
                                         if (typeof window !== "undefined") {
                                             try {
@@ -518,15 +825,20 @@ const CartProduct: React.FC<CartProductProps> = ({ open, onClose, onCheckout }) 
                                                         total,
                                                         discount,
                                                         payableTotal,
+                                                        couponApplied,
+                                                        spinWheelReward: spinReward,
                                                         createdAt: Date.now(),
                                                         payment: {
                                                             orderId: payload?.orderId,
                                                             paymentId: payload?.paymentId,
+                                                            qrCodeId: payload?.qrCodeId,
                                                             amount: payableTotal,
                                                             currency: "INR",
                                                             status: "paid",
                                                             method: paymentMode,
-                                                            machineLocation: machineLocation,
+                                                            machineId,
+                                                            machineName,
+                                                            machineLocation,
                                                         },
                                                     })
                                                 );
@@ -554,6 +866,7 @@ const CartProduct: React.FC<CartProductProps> = ({ open, onClose, onCheckout }) 
                                                         items: orderItems,
                                                         totalAmount: payableTotal,
                                                         paymentId: payload?.paymentId,
+                                                        qrCodeId: payload?.qrCodeId,
                                                         razorpayOrderId: payload?.orderId,
                                                         paymentMode,
                                                     }),
@@ -573,12 +886,19 @@ const CartProduct: React.FC<CartProductProps> = ({ open, onClose, onCheckout }) 
                                                     }),
                                                 }).catch(err => console.warn("[Payment] Failed to record transaction:", err));
 
+                                                // Stable bill identity: always prefer paymentId (never Date.now()).
+                                                const stableOrderId =
+                                                    orderData?.order?.id ||
+                                                    payload?.paymentId ||
+                                                    payload?.orderId ||
+                                                    dedupeKey;
+
                                                 // Save POSIFLY bill data
                                                 await fetch("/api/posifly/bills", {
                                                     method: "POST",
                                                     headers: { "Content-Type": "application/json" },
                                                     body: JSON.stringify({
-                                                        orderId: orderData?.order?.id || `order_${Date.now()}`,
+                                                        orderId: stableOrderId,
                                                         items: orderItems,
                                                         totalAmount: payableTotal,
                                                         discountAmount: discount,
@@ -597,143 +917,31 @@ const CartProduct: React.FC<CartProductProps> = ({ open, onClose, onCheckout }) 
                                     }}
                                     label="Pay with UPI"
                                 />
+                                )}
                             </Box>
                         ) : step === "checkout" ? (
                             <>
-                                <Box sx={{ bgcolor: "#fff", borderRadius: 2, p: 2, border: "1px solid #e5e7eb" }}>
-                                    <Typography sx={{ fontWeight: 700, fontSize: 28, mb: 2 }}>
-                                        Review your order
-                                    </Typography>
+                                <CheckoutOrderReview items={items} total={total} />
+{/* 
+                                <ThubCouponSection
+                                  applied={thubCouponApplied}
+                                  discountAmount={thubDiscount}
+                                  disabled={spinDiscount > 0}
+                                  onToggle={handleToggleThubCoupon}
+                                  onRemove={handleRemoveThubCoupon}
+                                /> */}
 
-                                    <Box sx={{ display: "flex", flexDirection: "column", gap: 1.25 }}>
-                                        {items.map((it, idx) => {
-                                            const lineTotal = parsePrice(it.priceText) * (it.quantity || 0);
-                                            return (
-                                                <Box key={`${it.id || it.name}-${idx}-checkout`} sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-                                                    <Box
-                                                        sx={{
-                                                            width: 80,
-                                                            height: 80,
-                                                            borderRadius: 1,
-                                                            bgcolor: "#f3f4f6",
-                                                            overflow: "hidden",
-                                                            position: "relative",
-                                                            flex: "0 0 auto",
-                                                        }}
-                                                    >
-                                                        {it.imageUrl ? (
-                                                            <Box
-                                                                component="img"
-                                                                src={it.imageUrl}
-                                                                alt={it.name}
-                                                                sx={{
-                                                                    width: "100%",
-                                                                    height: "100%",
-                                                                    objectFit: "contain",
-                                                                    display: "block",
-                                                                }}
-                                                            />
-                                                        ) : null}
-                                                    </Box>
-
-                                                    <Box sx={{ flex: 1, minWidth: 0 }}>
-                                                        <Typography
-                                                            sx={{
-                                                                fontWeight: 500,
-                                                                fontSize: 24,
-                                                                lineHeight: 1.2,
-                                                                overflow: "hidden",
-                                                                textOverflow: "ellipsis",
-                                                                whiteSpace: "nowrap",
-                                                            }}
-                                                        >
-                                                            {capitalizeWords(it.name)} &nbsp; x{it.quantity || 1}
-                                                        </Typography>
-                                                    </Box>
-
-                                                    <ProductPrice
-                                                        retailPrice={it.originalPrice}
-                                                        discountValue={it.discountValue}
-                                                        priceText={it.priceText || ""}
-                                                        productId={it.id}
-                                                        productName={it.name}
-                                                    />
-                                                </Box>
-                                            );
-                                        })}
-                                    </Box>
-
-                                    <Divider sx={{ my: 1.5 }} />
-
-                                    <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                                        <Typography sx={{ fontWeight: 700, fontSize: 24 }}>Total</Typography>
-                                        <Typography sx={{ fontWeight: 700, fontSize: 24 }}>Rs.{Math.round(total)}/-</Typography>
-                                    </Box>
-                                </Box>
-
-                                {/* <Box sx={{ mt: 2, bgcolor: "#fff", borderRadius: 2, p: 2, border: "2px solid #316D52" }}>
-                                    <Box sx={{ display: "flex", alignItems: "center", gap: 1, mb: 1.5 }}>
-                                        <Box sx={{ color: "#316D52", display: "flex", alignItems: "center" }}>
-                                            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M21.41 11.58l-9-9C12.05 2.22 11.55 2 11 2H4c-1.1 0-2 .9-2 2v7c0 .55.22 1.05.59 1.42l9 9c.36.36.86.58 1.41.58s1.05-.22 1.41-.59l7-7c.37-.36.59-.86.59-1.41s-.23-1.06-.59-1.42zM5.5 7C4.67 7 4 6.33 4 5.5S4.67 4 5.5 4 7 4.67 7 5.5 6.33 7 5.5 7z" /></svg>
-                                        </Box>
-                                        <Typography sx={{ fontWeight: 600, fontSize: 28, color: "#316D52" }}>Coupon Code</Typography>
-                                    </Box>
-                                    <Box sx={{ display: "flex", alignItems: "center", height: 48 }}>
-                                        <Box
-                                            sx={{
-                                                flex: "1 1 auto",
-                                                border: "1px solid #d1d5db",
-                                                borderRadius: "6px 0 0 6px",
-                                                borderRight: "none",
-                                                px: 2,
-                                                height: "100%",
-                                                display: "flex",
-                                                alignItems: "center",
-                                                bgcolor: "#fff",
-                                                overflow: "hidden",
-                                            }}
-                                        >
-                                            <Typography sx={{ fontSize: 20, color: "#333", whiteSpace: "nowrap" }}>
-                                                T Hub Exclusive Prevailing Discount + <span style={{ color: "#316D52", fontWeight: 700 }}>Extra 5% Discount</span>
-                                            </Typography>
-                                        </Box>
-                                        <Button
-                                            variant="contained"
-                                            disableElevation
-                                            onClick={() => setCouponApplied((v) => !v)}
-                                            sx={{
-                                                textTransform: "none",
-                                                fontWeight: 600,
-                                                fontSize: 20,
-                                                borderRadius: "0 6px 6px 0",
-                                                width: 100,
-                                                minWidth: 100,
-                                                height: "100%",
-                                                
-                                                flexShrink: 0,
-                                                bgcolor: "#1e6343",
-                                                color: "#fff",
-                                                "&:hover": { bgcolor: "#164a32" },
-                                            }}
-                                        >
-                                            Apply
-                                        </Button>
-                                    </Box>
-                                </Box>
-                                {couponApplied && (
-                                    <Box sx={{ mt: 1.5, display: "flex", alignItems: "flex-start", gap: 1, bgcolor: "#f0fdf4", borderRadius: 2, p: 1.5, border: "1px solid #bbf7d0" }}>
-                                        <Box sx={{ color: "#316D52", display: "flex", alignItems: "center", mt: 0.2 }}>
-                                            <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" /></svg>
-                                        </Box>
-                                        <Box sx={{ flex: 1 }}>
-                                            <Typography sx={{ fontWeight: 700, fontSize: 20, color: "#166534" }}>Coupon applied successfully!</Typography>
-                                            <Typography sx={{ fontSize: 18, color: "#166534", mt: 0.3 }}>You will get 5% off on this order.</Typography>
-                                        </Box>
-                                        <IconButton size="small" onClick={() => setCouponApplied(false)} sx={{ color: "#6b7280", p: 0.3 }}>
-                                            <CloseIcon sx={{ fontSize: 20 }} />
-                                        </IconButton>
-                                    </Box>
-                                )} */}
+                                <SpinWheelRewardSection
+                                  spinReward={spinReward}
+                                  spinValidation={spinValidation}
+                                  couponApplied={couponApplied}
+                                  couponMessage={couponMessage}
+                                  spinDiscount={spinDiscount}
+                                  isNextPurchaseOnly={isNextPurchaseOnly}
+                                  isDeferredOnly={isDeferredOnly}
+                                  onApply={handleApplySpinCoupon}
+                                  onRemove={handleRemoveSpinCoupon}
+                                />
                             </>
                         ) : items.length === 0 ? (
                             <Box sx={{ py: 2, textAlign: "center" }}>
@@ -906,116 +1114,17 @@ const CartProduct: React.FC<CartProductProps> = ({ open, onClose, onCheckout }) 
                     </Box>
 
                     <Divider />
-                    <Box sx={{ px: 2, py: 1.5, bgcolor: "#fff" }}>
-                        <Typography sx={{ fontSize: 24, color: "text.secondary" }}>TO PAY</Typography>
-                        <Box sx={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", mt: 0.5 }}>
-                            <Box>
-                                <Typography sx={{
-                                    mt: 2,
-                                    mb: 0.75,
-                                    fontFamily: 'Roboto, system-ui, -apple-system, "Segoe UI", Arial, sans-serif',
-                                    fontWeight: 510,
-                                    fontSize: "24px",
-                                    lineHeight: "100%",
-                                    letterSpacing: "0%",
-                                }}>
-                                    Your Cart total
-                                </Typography>
-                                <Typography
-                                    role="button"
-                                    tabIndex={0}
-                                    onClick={() => setShowPriceDetails((v) => !v)}
-                                    onKeyDown={(e) => {
-                                        if (e.key === "Enter" || e.key === " ") setShowPriceDetails((v) => !v);
-                                    }}
-                                    sx={{
-                                        fontSize: 24,
-                                        color: "text.secondary",
-                                        textDecoration: "underline",
-                                        cursor: "pointer",
-                                        userSelect: "none",
-                                    }}
-                                >
-                                    Tap to view details
-                                </Typography>
-                            </Box>
-                            <Box sx={{ textAlign: "right" }}>
-                                {couponApplied && discount > 0 ? (
-                                    <Typography sx={{ fontSize: 12, color: "text.secondary", textDecoration: "line-through" }}>
-                                        Rs.{Math.round(total)}/-
-                                    </Typography>
-                                ) : null}
-                                <Typography sx={{ fontWeight: 900, fontSize: 24 }}>
-                                    Rs. {Math.round(couponApplied ? payableTotal : (Number.isFinite(total) ? total : 0))}/-
-                                </Typography>
-                            </Box>
-                        </Box>
-
-                        <Collapse in={showPriceDetails} timeout="auto" unmountOnExit>
-                            <Box sx={{ mt: 2, pt: 1.5, borderTop: "1px solid #e5e7eb" }}>
-                                {items.map((it, idx) => {
-                                    const lineTotal = parsePrice(it.priceText) * (it.quantity || 0);
-                                    return (
-                                        <Box
-                                            key={`${it.id || it.name}-${idx}-line`}
-                                            sx={{
-                                                display: "flex",
-                                                justifyContent: "space-between",
-                                                alignItems: "flex-start",
-                                                py: 1,
-                                            }}
-                                        >
-                                            <Box sx={{ minWidth: 0, pr: 2 }}>
-                                                <Typography
-                                                    sx={{
-                                                        fontWeight: 700,
-                                                        fontSize: 24,
-                                                        lineHeight: 1.2,
-                                                        overflow: "hidden",
-                                                        textOverflow: "ellipsis",
-                                                        display: "-webkit-box",
-                                                        WebkitLineClamp: 2,
-                                                        WebkitBoxOrient: "vertical",
-                                                    }}
-                                                >
-                                                    {capitalizeWords(it.name)}
-                                                </Typography>
-                                            </Box>
-                                            <Typography sx={{ fontWeight: 700, fontSize: 24, whiteSpace: "nowrap" }}>
-                                                Rs. {Math.round(Number.isFinite(lineTotal) ? lineTotal : 0)}/-
-                                            </Typography>
-                                        </Box>
-                                    );
-                                })}
-                            </Box>
-                        </Collapse>
-                    </Box>
+                    <CartToPayFooter
+                      items={items}
+                      total={total}
+                      payableTotal={payableTotal}
+                      discount={discount}
+                      showPriceDetails={showPriceDetails}
+                      onToggleDetails={() => setShowPriceDetails((v) => !v)}
+                    />
 
                     {/* Bottom action buttons hidden - moved to top header */}
                 </Box>
-
-                {/* Payment webhook reporter */}
-                <PaymentReporter
-                    active={paymentSuccess}
-                    user={{
-                        userId: (session?.user as any)?.id,
-                        name: (session?.user as any)?.name,
-                        email: (session?.user as any)?.email,
-                        phone: (session?.user as any)?.mobileNumber || (session?.user as any)?.phoneNumber || (session?.user as any)?.phone,
-                    }}
-                    products={items.map((item) => ({
-                        id: item.id,
-                        name: item.name,
-                        quantity: item.quantity,
-                        slotId: item.slotId,
-                        retailPrice: parsePrice(item.priceText),
-                        amount: parsePrice(item.priceText) * (item.quantity || 0),
-                    }))}
-                    transaction={paymentPayload}
-                    selectedSlots={items.map((item) => item.slotId).filter((slot): slot is number => slot !== undefined).map(String)}
-                    machineLocation={machineLocation}
-                    machineName={machineName}
-                />
             </Dialog>
         </>
     );

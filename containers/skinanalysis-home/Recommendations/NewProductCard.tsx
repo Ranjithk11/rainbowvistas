@@ -128,8 +128,8 @@ const NewProductCard = ({
       fullScreen={isMobile}
       PaperProps={{
         sx: {
-          width: isMobile ? "100%" : "75%",
-          maxWidth: isMobile ? "100%" : 700,
+          width: isMobile ? "100%" : "78%",
+          maxWidth: isMobile ? "100%" : 760,
           borderRadius: isMobile ? 0 : "16px",
           overflow: "hidden",
           maxHeight: isMobile ? "100vh" : "90vh",
@@ -169,8 +169,8 @@ const NewProductCard = ({
             src={imageUrl}
             alt={name}
             sx={{
-              width: isMobile ? 100 : 140,
-              height: isMobile ? 130 : 180,
+              width: isMobile ? 100 : 150,
+              height: isMobile ? 130 : 195,
               objectFit: "contain",
               flexShrink: 0,
               opacity: showSuccess ? 0.3 : 1,
@@ -255,7 +255,7 @@ const NewProductCard = ({
         <Box sx={{ mx: isMobile ? 1.5 : 3, mb: 2, border: "1px solid #e5e7eb", borderRadius: "12px", overflow: "hidden" }}>
           <Box sx={{ display: "flex", flexDirection: isMobile ? "column" : "row" }}>
             {/* BeautyPOD Price */}
-            <Box sx={{ flex: 1, p: isMobile ? 1.5 : 2, borderRight: isMobile ? "none" : "1px solid #e5e7eb", borderBottom: isMobile ? "1px solid #e5e7eb" : "none" }}>
+            <Box sx={{ flex: 1, p: isMobile ? 1.5 : 2.5, borderRight: isMobile ? "none" : "1px solid #e5e7eb", borderBottom: isMobile ? "1px solid #e5e7eb" : "none" }}>
               <Typography sx={{ fontSize: isMobile ? 14 : 20, fontWeight: 700, color: "#1a3c34", mb: 0.5 }}>
                 BeautyPOD Price
               </Typography>
@@ -290,7 +290,7 @@ const NewProductCard = ({
             </Box>
 
             {/* Price Comparison */}
-            <Box sx={{ flex: 1, p: isMobile ? 1.5 : 2 }}>
+            <Box sx={{ flex: 1, p: isMobile ? 1.5 : 2.5 }}>
               <Typography sx={{ fontSize: isMobile ? 13 : 18, fontWeight: 700, color: "#6b7280", letterSpacing: 0.5, mb: 1.5 }}>
                 PRICE COMPARISON
               </Typography>
@@ -391,7 +391,7 @@ const NewProductCard = ({
         )}
 
         {/* WHY BUY FROM BEAUTYPOD */}
-        <Box sx={{ mx: isMobile ? 1.5 : 3, mb: 2, border: "1px solid #e5e7eb", borderRadius: "12px", p: isMobile ? 1.5 : 2 }}>
+        <Box sx={{ mx: isMobile ? 1.5 : 3, mb: 2, border: "1px solid #e5e7eb", borderRadius: "12px", p: isMobile ? 1.5 : 2.5 }}>
           <Typography sx={{ fontSize: isMobile ? 14 : 24, fontWeight: 700, color: "#1a3c34", letterSpacing: 0.5, mb: 1.5 }}>
             WHY <span style={{ color: "#16a34a" }}>BUY</span> FROM <span style={{ color: "#e54810" }}>BEAUTYPOD</span>?
           </Typography>
@@ -465,7 +465,8 @@ const NewProductCard = ({
               bgcolor: "#1a3c34",
               color: "#fff",
               borderRadius: "12px",
-              py: isMobile ? 1 : 1.5,
+              py: isMobile ? 1.25 : 1.75,
+              minHeight: isMobile ? 48 : 64,
               fontSize: isMobile ? 16 : 26,
               fontWeight: 700,
               textTransform: "uppercase",

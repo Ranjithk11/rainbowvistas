@@ -3,6 +3,8 @@
 //
 // The endpoint can be overridden via NEXT_PUBLIC_SCAN_COMPLETED_WEBHOOK_URL.
 
+import type { SpinWheelWebhookPayload } from "@/lib/spin-wheel/webhook";
+
 const DEFAULT_SCAN_COMPLETED_WEBHOOK_URL =
   "https://hook.eu1.make.com/2jsb7s7vin1sohcbdc0ttfv31p9mofhu";
 
@@ -243,6 +245,7 @@ export interface DispenseErrorProductInfo {
 export interface DispenseErrorPaymentInfo {
   orderId?: string;
   paymentId?: string;
+  qrCodeId?: string;
   amount?: number;
   currency?: string;
   status?: string;
@@ -258,8 +261,10 @@ export interface DispenseErrorPayload {
   raw?: unknown;
   /** Machine location where the error occurred */
   machineLocation?: string;
+  /** Machine name where the error occurred */
+  machineName?: string;
   /** Optional dedup key. If the same key was reported in this session, the
-   *  webhook will not fire again. Defaults to a hash of errorMessage + orderId. */
+   *  webhook will not fire again. Defaults to paymentId + orderId. */
   dedupeKey?: string;
 }
 
@@ -294,12 +299,34 @@ function persistDispenseErrorFiredToSession() {
 
 /**
  * Best-effort POST of a `dispense_error` event to the configured webhook.
- *
- * Failures are swallowed and logged so they never block the user-facing flow.
- * A simple in-memory + sessionStorage de-duplication guard prevents the same
- * (errorMessage + orderId) combination from triggering multiple webhook fires
- * within a single session.
+ * Dedupes by order/payment/qr + message; claim is synchronous before fetch.
  */
+export function dispenseErrorWebhookDedupeKeys(payment?: {
+  orderId?: string;
+  paymentId?: string;
+  qrCodeId?: string;
+}, errorMessage?: string): string[] {
+  const msg = String(errorMessage || "unknown").trim();
+  const keys: string[] = [];
+  const orderId = String(payment?.orderId || "").trim();
+  const paymentId = String(payment?.paymentId || "").trim();
+  const qrCodeId = String(payment?.qrCodeId || "").trim();
+  if (orderId) keys.push(`dispense_error::order::${orderId}::${msg}`);
+  if (paymentId) keys.push(`dispense_error::pay::${paymentId}::${msg}`);
+  if (qrCodeId) keys.push(`dispense_error::qr::${qrCodeId}::${msg}`);
+  if (keys.length === 0) keys.push(`dispense_error::msg::${msg}`);
+  return keys;
+}
+
+function claimDispenseErrorWebhookKeys(keys: string[]): boolean {
+  if (keys.length === 0) return false;
+  loadDispenseErrorFiredFromSession();
+  if (keys.some((k) => dispenseErrorFiredKeys.has(k))) return false;
+  keys.forEach((k) => dispenseErrorFiredKeys.add(k));
+  persistDispenseErrorFiredToSession();
+  return true;
+}
+
 export async function sendDispenseErrorWebhook(
   payload: DispenseErrorPayload
 ): Promise<void> {
@@ -308,12 +335,15 @@ export async function sendDispenseErrorWebhook(
       process.env.NEXT_PUBLIC_DISPENSE_ERROR_WEBHOOK_URL ||
       DEFAULT_DISPENSE_ERROR_WEBHOOK_URL;
 
-    const dedupeKey =
-      payload.dedupeKey ||
-      `${payload.errorMessage}::${payload.payment?.orderId || ""}`;
+    const keys = payload.dedupeKey
+      ? [
+          payload.dedupeKey,
+          ...dispenseErrorWebhookDedupeKeys(payload.payment, payload.errorMessage),
+        ]
+      : dispenseErrorWebhookDedupeKeys(payload.payment, payload.errorMessage);
+    const uniqueKeys = Array.from(new Set(keys.filter(Boolean)));
 
-    loadDispenseErrorFiredFromSession();
-    if (dispenseErrorFiredKeys.has(dedupeKey)) {
+    if (!claimDispenseErrorWebhookKeys(uniqueKeys)) {
       return;
     }
 
@@ -322,6 +352,7 @@ export async function sendDispenseErrorWebhook(
       error_message: payload.errorMessage || "Unknown dispense error",
       occurred_at: new Date().toISOString(),
       machine_location: payload.machineLocation || "",
+      machine_name: payload.machineName || "",
       user: {
         user_id: payload.user?.userId || "",
         name: payload.user?.name || "",
@@ -353,11 +384,8 @@ export async function sendDispenseErrorWebhook(
       body: JSON.stringify(body),
       keepalive: true,
     }).catch((err) => {
-      console.warn("[dispense_error webhook] request failed:", err);
+      console.warn("[dispense_error webhook] request failed:", url, err);
     });
-
-    dispenseErrorFiredKeys.add(dedupeKey);
-    persistDispenseErrorFiredToSession();
   } catch (err) {
     console.warn("[dispense_error webhook] unexpected error:", err);
   }
@@ -386,24 +414,27 @@ export interface PaymentProductInfo {
 export interface PaymentTransactionInfo {
   orderId?: string;
   paymentId?: string;
+  qrCodeId?: string;
   amount?: number;
   currency?: string;
   status?: string;
   method?: string;
+  agentName?: string;
+  staffAuthMethod?: "qr" | "password";
+  staffHash?: string;
+  staffRole?: string;
+  staffBranch?: string;
+  staffPhone?: string;
 }
 
 export interface PaymentPayload {
   user?: PaymentUserInfo;
   products?: PaymentProductInfo[];
   transaction?: PaymentTransactionInfo;
-  /** Selected slot IDs for the purchased products */
   selectedSlots?: (string | number)[];
-  /** Machine location where payment occurred */
   machineLocation?: string;
-  /** Machine name where payment occurred */
   machineName?: string;
-  /** Optional dedup key. If the same key was reported in this session, the
-   *  webhook will not fire again. Defaults to a hash of orderId. */
+  spinWheel?: SpinWheelWebhookPayload | null;
   dedupeKey?: string;
 }
 
@@ -436,13 +467,32 @@ function persistPaymentFiredToSession() {
   }
 }
 
-/**
- * Best-effort POST of a `payment_success` event to the configured webhook.
- *
- * Failures are swallowed and logged so they never block the user-facing flow.
- * A simple in-memory + sessionStorage de-duplication guard prevents the same
- * orderId from triggering multiple webhook fires within a single session.
- */
+export function paymentWebhookDedupeKeys(transaction?: {
+  orderId?: string;
+  paymentId?: string;
+  qrCodeId?: string;
+}): string[] {
+  const keys: string[] = [];
+  const orderId = String(transaction?.orderId || "").trim();
+  const paymentId = String(transaction?.paymentId || "").trim();
+  const qrCodeId = String(transaction?.qrCodeId || "").trim();
+  if (orderId) keys.push(`payment_success::order::${orderId}`);
+  if (paymentId) keys.push(`payment_success::pay::${paymentId}`);
+  if (qrCodeId) keys.push(`payment_success::qr::${qrCodeId}`);
+  return keys;
+}
+
+function claimPaymentWebhookKeys(keys: string[]): boolean {
+  if (keys.length === 0) return false;
+  loadPaymentFiredFromSession();
+  if (keys.some((k) => paymentFiredKeys.has(k))) {
+    return false;
+  }
+  keys.forEach((k) => paymentFiredKeys.add(k));
+  persistPaymentFiredToSession();
+  return true;
+}
+
 export async function sendPaymentWebhook(
   payload: PaymentPayload
 ): Promise<void> {
@@ -451,20 +501,38 @@ export async function sendPaymentWebhook(
       process.env.NEXT_PUBLIC_PAYMENT_WEBHOOK_URL ||
       DEFAULT_PAYMENT_WEBHOOK_URL;
 
-    const dedupeKey =
-      payload.dedupeKey ||
-      `payment::${payload.transaction?.orderId || ""}`;
+    const keys = payload.dedupeKey
+      ? [payload.dedupeKey, ...paymentWebhookDedupeKeys(payload.transaction)]
+      : paymentWebhookDedupeKeys(payload.transaction);
 
-    loadPaymentFiredFromSession();
-    if (paymentFiredKeys.has(dedupeKey)) {
+    const uniqueKeys = Array.from(new Set(keys.filter(Boolean)));
+    if (uniqueKeys.length === 0) {
+      console.warn("[payment webhook] skipped — no order/payment id");
       return;
     }
+
+    if (!claimPaymentWebhookKeys(uniqueKeys)) {
+      return;
+    }
+
+    const agentName = payload.transaction?.agentName || "";
+    const agentPhone = payload.transaction?.staffPhone || "";
+    const agentBranch = payload.transaction?.staffBranch || "";
+    const agentStaffname = [agentName, agentPhone, agentBranch]
+      .filter(Boolean)
+      .join("|");
 
     const body = {
       event: "payment_success",
       occurred_at: new Date().toISOString(),
       machine_location: payload.machineLocation || "",
       machine_name: payload.machineName || "",
+      agent_name: agentName,
+      agent_phone: agentPhone,
+      agent_branch: agentBranch,
+      agent_staffname: agentStaffname,
+      staff_auth_method: payload.transaction?.staffAuthMethod || "",
+      amount: payload.transaction?.amount ?? null,
       selected_slots: payload.selectedSlots || [],
       user: {
         user_id: payload.user?.userId || "",
@@ -487,7 +555,13 @@ export async function sendPaymentWebhook(
         currency: payload.transaction?.currency || "INR",
         status: payload.transaction?.status || "",
         method: payload.transaction?.method || "",
+        agent_name: agentName,
+        agent_phone: agentPhone,
+        agent_branch: agentBranch,
+        agent_staffname: agentStaffname,
+        staff_auth_method: payload.transaction?.staffAuthMethod || "",
       },
+      spin_wheel: payload.spinWheel ?? null,
     };
 
     await fetch(url, {
@@ -498,9 +572,6 @@ export async function sendPaymentWebhook(
     }).catch((err) => {
       console.warn("[payment webhook] request failed:", err);
     });
-
-    paymentFiredKeys.add(dedupeKey);
-    persistPaymentFiredToSession();
   } catch (err) {
     console.warn("[payment webhook] unexpected error:", err);
   }
@@ -529,10 +600,12 @@ export interface DispenseSuccessProductInfo {
 export interface DispenseSuccessTransactionInfo {
   orderId?: string;
   paymentId?: string;
+  qrCodeId?: string;
   amount?: number;
   currency?: string;
   status?: string;
   method?: string;
+  agentName?: string;
 }
 
 export interface DispenseSuccessCommandInfo {
@@ -549,10 +622,14 @@ export interface DispenseSuccessPayload {
   transaction?: DispenseSuccessTransactionInfo;
   /** Command info - which product was dispensed and from which slot */
   command?: DispenseSuccessCommandInfo;
+  /** Agent name (set for cash sales authorized by an agent) */
+  agentName?: string;
   /** Machine location where dispense occurred */
   machineLocation?: string;
+  /** Machine name where dispense occurred */
+  machineName?: string;
   /** Optional dedup key. If the same key was reported in this session, the
-   *  webhook will not fire again. Defaults to a hash of orderId + productId. */
+   *  webhook will not fire again. Defaults to paymentId + orderId. */
   dedupeKey?: string;
 }
 
@@ -587,12 +664,34 @@ function persistDispenseSuccessFiredToSession() {
 
 /**
  * Best-effort POST of a `dispense_success` event to the configured webhook.
- *
- * Failures are swallowed and logged so they never block the user-facing flow.
- * A simple in-memory + sessionStorage de-duplication guard prevents the same
- * (orderId + productId) combination from triggering multiple webhook fires
- * within a single session.
+ * Dedupes by order/payment/qr (+ slot); claim is synchronous before fetch.
  */
+export function dispenseSuccessWebhookDedupeKeys(transaction?: {
+  orderId?: string;
+  paymentId?: string;
+  qrCodeId?: string;
+}, slotOrProductKey?: string): string[] {
+  const slotKey = String(slotOrProductKey || "").trim();
+  const keys: string[] = [];
+  const orderId = String(transaction?.orderId || "").trim();
+  const paymentId = String(transaction?.paymentId || "").trim();
+  const qrCodeId = String(transaction?.qrCodeId || "").trim();
+  const suffix = slotKey ? `::${slotKey}` : "";
+  if (orderId) keys.push(`dispense_success::order::${orderId}${suffix}`);
+  if (paymentId) keys.push(`dispense_success::pay::${paymentId}${suffix}`);
+  if (qrCodeId) keys.push(`dispense_success::qr::${qrCodeId}${suffix}`);
+  return keys;
+}
+
+function claimDispenseSuccessWebhookKeys(keys: string[]): boolean {
+  if (keys.length === 0) return false;
+  loadDispenseSuccessFiredFromSession();
+  if (keys.some((k) => dispenseSuccessFiredKeys.has(k))) return false;
+  keys.forEach((k) => dispenseSuccessFiredKeys.add(k));
+  persistDispenseSuccessFiredToSession();
+  return true;
+}
+
 export async function sendDispenseSuccessWebhook(
   payload: DispenseSuccessPayload
 ): Promise<void> {
@@ -601,19 +700,35 @@ export async function sendDispenseSuccessWebhook(
       process.env.NEXT_PUBLIC_DISPENSE_WEBHOOK_URL ||
       DEFAULT_DISPENSE_WEBHOOK_URL;
 
-    const dedupeKey =
-      payload.dedupeKey ||
-      `dispense::${payload.transaction?.orderId || ""}::${payload.command?.productId || ""}`;
+    const slotKey =
+      payload.command?.slotId ?? payload.command?.productId ?? "";
+    const keys = payload.dedupeKey
+      ? [
+          payload.dedupeKey,
+          ...dispenseSuccessWebhookDedupeKeys(payload.transaction, String(slotKey)),
+        ]
+      : dispenseSuccessWebhookDedupeKeys(payload.transaction, String(slotKey));
+    const uniqueKeys = Array.from(new Set(keys.filter(Boolean)));
 
-    loadDispenseSuccessFiredFromSession();
-    if (dispenseSuccessFiredKeys.has(dedupeKey)) {
+    if (uniqueKeys.length === 0) {
+      console.warn("[dispense_success webhook] skipped — no order/payment id");
       return;
     }
+
+    if (!claimDispenseSuccessWebhookKeys(uniqueKeys)) {
+      return;
+    }
+
+    const agentName =
+      payload.agentName || payload.transaction?.agentName || "";
 
     const body = {
       event: "dispense_success",
       occurred_at: new Date().toISOString(),
       machine_location: payload.machineLocation || "",
+      machine_name: payload.machineName || "",
+      agent_name: agentName,
+      amount: payload.transaction?.amount ?? null,
       user: {
         user_id: payload.user?.userId || "",
         name: payload.user?.name || "",
@@ -635,6 +750,7 @@ export async function sendDispenseSuccessWebhook(
         currency: payload.transaction?.currency || "INR",
         status: payload.transaction?.status || "",
         method: payload.transaction?.method || "",
+        agent_name: agentName,
       },
       command: {
         product_id: payload.command?.productId || "",
@@ -651,11 +767,8 @@ export async function sendDispenseSuccessWebhook(
       body: JSON.stringify(body),
       keepalive: true,
     }).catch((err) => {
-      console.warn("[dispense_success webhook] request failed:", err);
+      console.warn("[dispense_success webhook] request failed:", url, err);
     });
-
-    dispenseSuccessFiredKeys.add(dedupeKey);
-    persistDispenseSuccessFiredToSession();
   } catch (err) {
     console.warn("[dispense_success webhook] unexpected error:", err);
   }
@@ -693,7 +806,7 @@ export interface SlotUpdatePayload {
   /** Updated product information (if product modification occurred) */
   product?: SlotUpdateProductInfo;
   /** Type of update: 'slot_assignment' or 'product_modification' */
-  updateType?: 'slot_assignment' | 'product_modification';
+  updateType?: string;
   /** Slot IDs affected by this update */
   affectedSlotIds?: number[];
   /** Timestamp of the update */
@@ -702,6 +815,8 @@ export interface SlotUpdatePayload {
   machineLocation?: string;
   /** Machine name where the update occurred */
   machineName?: string;
+  /** Machine identifier (analytics backend id) */
+  machineId?: string;
 }
 
 /**
@@ -721,14 +836,25 @@ export async function sendSlotUpdateWebhook(
       process.env.NEXT_PUBLIC_SLOT_UPDATE_WEBHOOK_URL ||
       DEFAULT_SLOT_UPDATE_WEBHOOK_URL;
 
+    const machineName = payload.machineName || process.env.NEXT_PUBLIC_MACHINE_NAME || "";
+    const machineLocation = payload.machineLocation || process.env.NEXT_PUBLIC_MACHINE_LOCATION || "LeafWater Vending Machine";
+    const machineId = payload.machineId || process.env.NEXT_PUBLIC_MACHINE_ID || "";
+
     const body = {
       event: payload.updateType || "slot_update",
       occurred_at: payload.timestamp || new Date().toISOString(),
+      total_slots: (payload.slots || []).length,
       slots: payload.slots || [],
       product: payload.product || null,
       affected_slot_ids: payload.affectedSlotIds || [],
-      machine_location: payload.machineLocation || process.env.NEXT_PUBLIC_MACHINE_LOCATION || "LeafWater Vending Machine",
-      machine_name: payload.machineName || "",
+      machine_name: machineName,
+      machine_location: machineLocation,
+      machine_id: machineId,
+      machine: {
+        name: machineName,
+        location: machineLocation,
+        id: machineId,
+      },
     };
 
     console.log("[slot_update webhook] Sending webhook to:", url);
@@ -763,23 +889,23 @@ export interface ConsultationUserInfo {
 
 export interface ConsultationPayload {
   user?: ConsultationUserInfo;
-  /** Detected skin attribute codes / labels from the AI analysis. */
+  preferredTime?: string;
   detectedAttributes?: unknown;
-  /** Prioritised key concerns from the report. */
   keyConcerns?: unknown;
-  /** Per-metric skin scores. */
   skinMetrics?: unknown;
-  /** Resolved skin type (e.g. OILY_SKIN). */
   skinType?: string | null;
-  /** Overall skin health score / rating shown to the user. */
   overallScore?: number | string | null;
   overallRating?: string | null;
-  /** Clickable public report URL. */
   resultUrl?: string;
-  /** Machine name where the lead was captured. */
   machineName?: string;
-  /** Machine location where the lead was captured. */
   machineLocation?: string;
+  source?: string;
+  spinWheel?: {
+    couponCode?: string;
+    rewardType?: string;
+    title?: string;
+    segmentId?: string;
+  };
 }
 
 /**
@@ -798,6 +924,7 @@ export async function sendConsultationWebhook(
     const body = {
       event: "free_consultation_request",
       requested_at: new Date().toISOString(),
+      source: payload.source || "",
       user: {
         user_id: payload.user?.userId || "",
         name: payload.user?.name || "",
@@ -811,8 +938,17 @@ export async function sendConsultationWebhook(
       overall_score: payload.overallScore ?? null,
       overall_rating: payload.overallRating || "",
       result_url: payload.resultUrl || "",
+      preferred_time: payload.preferredTime || "",
       machine_name: payload.machineName || "",
       machine_location: payload.machineLocation || "",
+      spin_wheel: payload.spinWheel
+        ? {
+            coupon_code: payload.spinWheel.couponCode || "",
+            reward_type: payload.spinWheel.rewardType || "",
+            title: payload.spinWheel.title || "",
+            segment_id: payload.spinWheel.segmentId || "",
+          }
+        : null,
     };
 
     const res = await fetch(url, {
@@ -827,4 +963,151 @@ export async function sendConsultationWebhook(
     console.warn("[consultation webhook] request failed:", err);
     return false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Spin-wheel offer webhook (birthday, next-purchase, cart discounts, etc.)
+// ---------------------------------------------------------------------------
+
+const DEFAULT_SPIN_WHEEL_LEAD_WEBHOOK_URL =
+  "https://hook.eu1.make.com/gimljdauory9hjmmh3tzp8jotqwq67jd";
+
+const DEFAULT_BIRTHDAY_OFFER_WEBHOOK_URL = DEFAULT_SPIN_WHEEL_LEAD_WEBHOOK_URL;
+
+export type SpinWheelLeadEvent =
+  | "birthday_offer_lead"
+  | "next_purchase_offer_lead"
+  | "spin_wheel_discount_lead"
+  | "spin_wheel_no_prize"
+  | "spin_wheel_offer_lead";
+
+export interface BirthdayOfferUserInfo {
+  userId?: string;
+  name?: string;
+  phone?: string;
+  dateOfBirth?: string;
+  email?: string;
+}
+
+export interface BirthdayOfferPayload {
+  event?: SpinWheelLeadEvent;
+  user?: BirthdayOfferUserInfo;
+  machineName?: string;
+  machineLocation?: string;
+  spinWheel?: {
+    couponCode?: string;
+    rewardType?: string;
+    title?: string;
+    description?: string;
+    segmentId?: string;
+    appliesToCart?: boolean;
+    wonAt?: number;
+  };
+}
+
+function resolveSpinWheelLeadWebhookUrl(): string {
+  return (
+    process.env.NEXT_PUBLIC_SPIN_WHEEL_LEAD_WEBHOOK_URL ||
+    process.env.NEXT_PUBLIC_BIRTHDAY_OFFER_WEBHOOK_URL ||
+    DEFAULT_SPIN_WHEEL_LEAD_WEBHOOK_URL
+  );
+}
+
+export async function fetchMachineContext(): Promise<{
+  machineName: string;
+  machineLocation: string;
+}> {
+  const fallbackName =
+    process.env.NEXT_PUBLIC_MACHINE_NAME || "Vending Machine";
+  const fallbackLocation =
+    process.env.NEXT_PUBLIC_MACHINE_LOCATION || "LeafWater Vending Machine";
+
+  try {
+    const res = await fetch("/api/admin/machine-name");
+    const data = await res.json();
+    if (data?.success) {
+      return {
+        machineName: String(data.machineName || "").trim() || fallbackName,
+        machineLocation:
+          String(data.machineLocation || "").trim() || fallbackLocation,
+      };
+    }
+  } catch {
+    // ignore — use env fallbacks
+  }
+
+  return { machineName: fallbackName, machineLocation: fallbackLocation };
+}
+
+export function spinWheelLeadEventForRewardType(
+  rewardType?: string
+): SpinWheelLeadEvent {
+  switch (rewardType) {
+    case "PERCENT_BIRTHDAY_15":
+      return "birthday_offer_lead";
+    case "FLAT_100":
+      return "next_purchase_offer_lead";
+    case "PERCENT_EXTRA_5":
+    case "FLAT_200_MIN_2999":
+      return "spin_wheel_discount_lead";
+    case "NO_PRIZE":
+      return "spin_wheel_no_prize";
+    default:
+      return "spin_wheel_offer_lead";
+  }
+}
+
+export async function sendSpinWheelLeadWebhook(
+  payload: BirthdayOfferPayload
+): Promise<boolean> {
+  try {
+    const url = resolveSpinWheelLeadWebhookUrl();
+
+    const body = {
+      event:
+        payload.event ||
+        spinWheelLeadEventForRewardType(payload.spinWheel?.rewardType) ||
+        "birthday_offer_lead",
+      requested_at: new Date().toISOString(),
+      source: "spin_wheel",
+      user: {
+        user_id: payload.user?.userId || "",
+        name: payload.user?.name || "",
+        phone: payload.user?.phone || "",
+        email: payload.user?.email || "",
+        date_of_birth: payload.user?.dateOfBirth || "",
+      },
+      machine_name: payload.machineName || "",
+      machine_location: payload.machineLocation || "",
+      spin_wheel: {
+        coupon_code: payload.spinWheel?.couponCode || "",
+        reward_type: payload.spinWheel?.rewardType || "",
+        title: payload.spinWheel?.title || "",
+        description: payload.spinWheel?.description || "",
+        segment_id: payload.spinWheel?.segmentId || "",
+        applies_to_cart: Boolean(payload.spinWheel?.appliesToCart),
+        won_at: payload.spinWheel?.wonAt
+          ? new Date(payload.spinWheel.wonAt).toISOString()
+          : "",
+      },
+    };
+
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      keepalive: true,
+    });
+
+    return res.ok;
+  } catch (err) {
+    console.warn("[spin-wheel lead webhook] request failed:", err);
+    return false;
+  }
+}
+
+export async function sendBirthdayOfferWebhook(
+  payload: BirthdayOfferPayload
+): Promise<boolean> {
+  return sendSpinWheelLeadWebhook(payload);
 }

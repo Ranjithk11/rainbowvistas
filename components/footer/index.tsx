@@ -58,7 +58,8 @@ const FooterComponent = () => {
         >
           <Grid item>
             <Box mb={3} textAlign="center">
-              <img src="/logo/footer_logo.svg" width={150} />
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src="/logo/footer_logo.svg" width={150} alt="Leaf Water" />
             </Box>
             {/* <Typography
               className="address"

@@ -24,9 +24,17 @@ import { useAppDispatch } from "@/redux/store/store";
 import { clearCart } from "@/redux/reducers/cartSlice";
 import { SOCIAL_LINKS } from "@/utils/constants";
 import { AiFillFacebook, AiFillInstagram, AiFillYoutube } from "react-icons/ai";
-import IdleVideoOverlay from "@/components/ui/IdleVideoOverlay";
 import IdleRedirect from "@/components/ui/IdleRedirect";
+// Idle video disabled — home goes straight to NewPromoLanding (incl. refresh).
+// import IdleVideoOverlay from "@/components/ui/IdleVideoOverlay";
 import StartupSync from "@/components/StartupSync";
+import { clearSpinWheelSession } from "@/lib/spin-wheel/session";
+
+// const IDLE_VIDEO_PLAYLIST = [
+//   "/videos/airport.mp4",
+//   "/videos/leafwater kavya reel .mp4",
+//   "/videos/leaf water  f 28th.mp4",
+// ];
 
 interface DefaultLayoutProps {
   children?: React.ReactNode;
@@ -166,6 +174,7 @@ const DefaultLayout = ({ children }: DefaultLayoutProps) => {
               <IconButton
                 onClick={() => {
                   dispatch(clearCart());
+                  clearSpinWheelSession();
                   signOut().then(() => {
                     router.push("https://leafwater.in/");
                   });
@@ -185,6 +194,7 @@ const DefaultLayout = ({ children }: DefaultLayoutProps) => {
                 variant="text"
                 onClick={() => {
                   dispatch(clearCart());
+                  clearSpinWheelSession();
                   signOut().then(() => {
                     router.push("https://leafwater.in/");
                   });
@@ -213,6 +223,7 @@ const DefaultLayout = ({ children }: DefaultLayoutProps) => {
                 <IconButton
                   onClick={() => {
                     dispatch(clearCart());
+                    clearSpinWheelSession();
                     signOut().then(() => {
                       router.push("/");
                     });
@@ -237,7 +248,7 @@ const DefaultLayout = ({ children }: DefaultLayoutProps) => {
       >
         <SideMenuComponent />
       </Drawer> */}
-      <IdleVideoOverlay reIdleMs={120_000} />
+      {/* <IdleVideoOverlay reIdleMs={120_000} sources={IDLE_VIDEO_PLAYLIST} /> */}
       <IdleRedirect defaultIdleMs={120_000} feedbackIdleMs={180_000} excludePaths={["/", "/admin"]} />
     </Fragment>
   );

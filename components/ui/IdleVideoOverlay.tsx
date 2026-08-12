@@ -5,26 +5,53 @@ import { Box, Typography } from "@mui/material";
 import { useRouter, usePathname } from "next/navigation";
 import { signOut } from "next-auth/react";
 import { APP_ROUTES } from "@/utils/routes";
+import { clearVisitorSession } from "@/utils/clearVisitorSession";
 import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
 
 type IdleVideoOverlayProps = {
   /** How long (ms) after user dismisses video before it re-appears on the home page. */
   reIdleMs?: number;
+  /** Single video src (used when `sources` is not provided). */
   src?: string;
+  /** Videos played one after another in a loop while idle. */
+  sources?: string[];
+  /** Play video audio (kiosk / user-gesture may be required by the browser). */
+  withAudio?: boolean;
 };
+
+const DEFAULT_IDLE_VIDEOS = ["/videos/airport.mp4"];
+
+function encodeVideoPath(path: string): string {
+  if (!path.startsWith("/")) return encodeURI(path);
+  return path
+    .split("/")
+    .map((part, i) => (i === 0 || !part ? part : encodeURIComponent(part)))
+    .join("/");
+}
 
 export default function IdleVideoOverlay({
   reIdleMs = 120_000,
   src = "/videos/airport.mp4",
+  sources,
+  withAudio = true,
 }: IdleVideoOverlayProps) {
+  const playlist = React.useMemo(() => {
+    const raw =
+      sources?.length ? sources : src ? [src] : DEFAULT_IDLE_VIDEOS;
+    return raw.map(encodeVideoPath);
+  }, [sources, src]);
   const router = useRouter();
   const pathname = usePathname();
   const isHome = pathname === "/";
 
   // On the home page, show video immediately on load/refresh.
   const [open, setOpen] = useState(isHome);
+  const [currentIndex, setCurrentIndex] = useState(0);
   const timerRef = useRef<number | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const currentIndexRef = useRef(0);
+  const playlistRef = useRef(playlist);
+  playlistRef.current = playlist;
   const dismissedRef = useRef(false);
   // Track whether this is the initial page load (true) vs client-side navigation (false)
   const initialLoadRef = useRef(true);
@@ -36,9 +63,51 @@ export default function IdleVideoOverlay({
     }
   }, []);
 
+  const playVideoAtIndex = useCallback(async (index: number) => {
+    const list = playlistRef.current;
+    const v = videoRef.current;
+    if (!v || !list.length) return;
+
+    const safeIndex = ((index % list.length) + list.length) % list.length;
+    currentIndexRef.current = safeIndex;
+    setCurrentIndex(safeIndex);
+
+    try {
+      v.pause();
+      v.src = list[safeIndex];
+      v.volume = withAudio ? 1 : 0;
+      v.muted = !withAudio;
+      v.load();
+
+      if (!withAudio) {
+        await v.play();
+        return;
+      }
+
+      // Prefer unmuted playback for kiosk idle promos.
+      v.muted = false;
+      try {
+        await v.play();
+        return;
+      } catch {
+        // Browser blocked autoplay with sound — start muted, then try to unmute.
+        v.muted = true;
+        await v.play();
+        v.muted = false;
+        try {
+          await v.play();
+        } catch {
+          v.muted = true;
+        }
+      }
+    } catch {}
+  }, [withAudio]);
+
   const hide = useCallback(() => {
     dismissedRef.current = true;
     setOpen(false);
+    currentIndexRef.current = 0;
+    setCurrentIndex(0);
     const v = videoRef.current;
     if (v) {
       try {
@@ -48,12 +117,24 @@ export default function IdleVideoOverlay({
     }
   }, []);
 
+  const handleVideoEnded = useCallback(() => {
+    const list = playlistRef.current;
+    if (!list.length) return;
+    const nextIndex = (currentIndexRef.current + 1) % list.length;
+    playVideoAtIndex(nextIndex);
+  }, [playVideoAtIndex]);
+
+  const handleVideoError = useCallback(() => {
+    handleVideoEnded();
+  }, [handleVideoEnded]);
+
   // Re-arm: after user dismisses the video on home page,
   // show it again after reIdleMs of inactivity.
   const arm = useCallback(() => {
     clearTimer();
     timerRef.current = window.setTimeout(async () => {
       // Clear any stale session before showing idle screen
+      clearVisitorSession();
       try {
         await signOut({ redirect: false });
       } catch {}
@@ -108,16 +189,25 @@ export default function IdleVideoOverlay({
   }, [isHome, arm, clearTimer, onGlobalActivity, pathname]);
 
   useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
+    if (!open || !withAudio) return;
 
-    if (open) {
-      try {
-        const p = v.play();
-        if (p && typeof (p as any).catch === "function") (p as any).catch(() => {});
-      } catch {}
-    }
-  }, [open]);
+    const unlockAudio = () => {
+      const v = videoRef.current;
+      if (!v) return;
+      v.muted = false;
+      v.volume = 1;
+      void v.play().catch(() => {});
+    };
+
+    window.addEventListener("pointerdown", unlockAudio, { once: true });
+    return () => window.removeEventListener("pointerdown", unlockAudio);
+  }, [open, withAudio]);
+
+  useEffect(() => {
+    if (!open) return;
+    currentIndexRef.current = 0;
+    playVideoAtIndex(0);
+  }, [open, playVideoAtIndex]);
 
   // --- Interaction Handlers ---
   const handleBackgroundClick = () => {
@@ -153,11 +243,10 @@ export default function IdleVideoOverlay({
       <Box
         component="video"
         ref={videoRef}
-        src={src}
         autoPlay
-        muted
-        loop
         playsInline
+        onEnded={handleVideoEnded}
+        onError={handleVideoError}
         sx={{
           width: "100%",
           height: "100%",
@@ -165,42 +254,45 @@ export default function IdleVideoOverlay({
         }}
       />
 
-      {/* The background container now acts as the global dismiss layer */}
+      {/* Overlay: title at top, action boxes pinned to bottom */}
       <Box
-        onClick={handleBackgroundClick} 
+        onClick={handleBackgroundClick}
         sx={{
           position: "absolute",
           inset: 0,
           display: "flex",
           flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
           px: 3,
+          pt: { xs: 5, md: 7 },
+          pb: { xs: 4, md: 5 },
         }}
       >
-        <Typography
-          sx={{
-            fontSize: { xs: 48, md: 52 },
-            fontWeight: 700,
-            color: "white",
-            textAlign: "center",
-            mb: 2,
-            textShadow: "0 2px 8px rgba(0,0,0,0.5)",
-          }}
-        >
-          Leafwater AI Beauty Pod
-        </Typography>
-        <Typography
-          sx={{
-            fontSize: { xs: 24, md: 24 },
-            color: "rgba(255,255,255,0.9)",
-            textAlign: "center",
-            mb: 5,
-            textShadow: "0 1px 4px rgba(0,0,0,0.4)",
-          }}
-        >
-          Your personalized skincare journey starts here
-        </Typography>
+        <Box sx={{ textAlign: "center" }}>
+          <Typography
+            sx={{
+              fontSize: { xs: 48, md: 52 },
+              fontWeight: 700,
+              color: "white",
+              textAlign: "center",
+              mb: 2,
+              textShadow: "0 2px 8px rgba(0,0,0,0.5)",
+            }}
+          >
+            Leafwater AI Beauty Pod
+          </Typography>
+          <Typography
+            sx={{
+              fontSize: { xs: 24, md: 24 },
+              color: "rgba(255,255,255,0.9)",
+              textAlign: "center",
+              textShadow: "0 1px 4px rgba(0,0,0,0.4)",
+            }}
+          >
+            Your personalized skincare journey starts here
+          </Typography>
+        </Box>
+
+        <Box sx={{ flex: 1, minHeight: 24 }} />
 
         <Box
           sx={{
@@ -209,7 +301,7 @@ export default function IdleVideoOverlay({
             gap: 3,
             width: "100%",
             maxWidth: 900,
-            px: 2,
+            mx: "auto",
           }}
         >
           <Box

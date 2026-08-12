@@ -99,6 +99,7 @@ interface ARCameraComponentProps {
   onSkip: () => void;
   disabledSkipBtn?: boolean;
   initializing: boolean;
+  modelsReady?: boolean;
   autoStart?: boolean;
 }
 
@@ -107,6 +108,7 @@ const ARCameraComponent = ({
   onSkip,
   disabledSkipBtn,
   initializing,
+  modelsReady = false,
   autoStart = false,
 }: ARCameraComponentProps) => {
   const [isCamOpen, setIsCamOpen] = useState<boolean>(false);
@@ -184,16 +186,18 @@ const ARCameraComponent = ({
 
   useEffect(() => {
     if (!autoStart) return;
-    if (initializing) return;
+    if (initializing || !modelsReady) return;
     if (isCamOpen) return;
     if (hasAutoStartedRef.current) return;
 
     hasAutoStartedRef.current = true;
     handleTakePicture();
-  }, [autoStart, initializing, isCamOpen]);
+    // handleTakePicture is stable enough for one-shot auto-start
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoStart, initializing, modelsReady, isCamOpen]);
 
   useEffect(() => {
-    if (!isCamOpen) {
+    if (!isCamOpen || !modelsReady) {
       setCountdownSeconds(null);
       setFaceDetected(false);
 
@@ -236,8 +240,10 @@ const ARCameraComponent = ({
       }
     };
 
-    detectFace();
-    faceDetectionIntervalRef.current = window.setInterval(detectFace, 250);
+    detectFace().catch(() => setFaceDetected(false));
+    faceDetectionIntervalRef.current = window.setInterval(() => {
+      detectFace().catch(() => setFaceDetected(false));
+    }, 250);
 
     return () => {
       if (faceDetectionIntervalRef.current !== null) {
@@ -245,7 +251,7 @@ const ARCameraComponent = ({
         faceDetectionIntervalRef.current = null;
       }
     };
-  }, [isCamOpen]);
+  }, [isCamOpen, modelsReady]);
 
   useEffect(() => {
     if (!isCamOpen) return;
@@ -336,7 +342,7 @@ const ARCameraComponent = ({
               >
                 <Grid item>
                   <Button
-                    disabled={initializing}
+                    disabled={initializing || !modelsReady}
                     sx={{ backgroundColor: "#3AC862" }}
                     endIcon={<Icon icon="material-symbols:camera" />}
                     onClick={() => {
@@ -352,7 +358,7 @@ const ARCameraComponent = ({
                 </Grid>
                 {/* <Grid item>
                   <Button
-                    disabled={initializing}
+                    disabled={initializing || !modelsReady}
                     sx={{ backgroundColor: "#48C2DD" }}
                     onClick={() => {
                       if (isCamOpen) {

@@ -200,6 +200,8 @@ const ImageUploadCard = ({ title, uploadControlKey }: ImageUploadCardProps) => {
         });
       }
     }
+    // Mount-only signed URL bootstrap for existing uploads
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.user]);
 
   return (

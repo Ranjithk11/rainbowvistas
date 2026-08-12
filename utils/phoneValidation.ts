@@ -106,6 +106,25 @@ export function getPhoneLengthError(phone: string, country: string): string | nu
  * - Sequential substrings: blocked when a known run appears (8+ digit strings)
  * - Heavy repetition: any digit 8+ times when total length ≤ 12
  */
+export function isIndianMobileCountry(country: string, callingCode?: string): boolean {
+  if (toCountryCode(country) === "IN") return true;
+  return (callingCode || "").replace(/\D/g, "") === "91";
+}
+
+/** Indian mobile numbers must start with 6, 7, 8, or 9 — not 1–5. */
+export function getIndianMobileStartError(
+  nationalDigits: string,
+  country: string,
+  callingCode?: string
+): string | null {
+  if (!nationalDigits || !isIndianMobileCountry(country, callingCode)) return null;
+  const firstDigit = nationalDigits[0];
+  if (firstDigit >= "1" && firstDigit <= "5") {
+    return "Please enter a valid phone number";
+  }
+  return null;
+}
+
 export function validatePhonePattern(
   nationalDigits: string,
   _country?: string,
@@ -114,6 +133,13 @@ export function validatePhonePattern(
   if (!nationalDigits) {
     return "Please enter a phone number";
   }
+
+  const indianStartError = getIndianMobileStartError(
+    nationalDigits,
+    _country || "IN",
+    _callingCode
+  );
+  if (indianStartError) return indianStartError;
 
   const len = nationalDigits.length;
 
@@ -166,26 +192,21 @@ export function validatePhone(
     return `Phone number must be ${maxLen} digits for this country`;
   }
 
-  // Indian mobile numbers must start with 6, 7, 8 or 9.
-  if (
-    country?.toUpperCase() === "IN" &&
-    nationalDigits.length > 0 &&
-    !/^[6-9]/.test(nationalDigits)
-  ) {
-    return "Please enter a valid phone number";
-  }
+  const patternError = validatePhonePattern(nationalDigits, country, callingCode);
+  if (patternError) return patternError;
 
   if (!isPhoneValidForCountry(phone, country)) {
     return getPhoneLengthError(phone, country) ?? "Please enter a valid phone number";
   }
 
-  return validatePhonePattern(nationalDigits, country, callingCode);
+  return null;
 }
 
 /** Reject MuiTelInput updates that exceed the country's mobile national length. */
 export function shouldAcceptPhoneValue(
   nationalNumber: string,
-  country: string
+  country: string,
+  _callingCode?: string
 ): boolean {
   return nationalNumber.length <= getMaxNationalLength(country);
 }

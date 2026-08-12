@@ -20,7 +20,7 @@ import {
 import axios from "axios";
 import { useSession } from "next-auth/react";
 import LoadingComponent from "@/components/loaders/Loading";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { APP_ROUTES } from "@/utils/routes";
 import SelectInputFieldComponent from "@/components/form-felds/SelectInput";
 import { skinTypes } from "@/utils/constants";
@@ -34,7 +34,14 @@ import { useAppSelector } from "@/redux/store/store";
 import Image from "next/image";
 import { ArrowBack } from "@mui/icons-material";
 import { useVoiceMessages, useVoice } from "@/contexts/VoiceContext";
-import { sendScanCompletedWebhook, extractScanAnalysisFields } from "@/utils/webhook";
+import { sendScanCompletedWebhook, extractScanAnalysisFields, sendConsultationWebhook } from "@/utils/webhook";
+import ConsultationConfirmed from "./Recommendations/ConsultationConfirmed";
+import {
+  FREE_CONSULTATION_FLOW,
+  isFreeConsultationFlow,
+  questionnairePathForFlow,
+  getConsultationTimeLabel,
+} from "@/lib/consultationFlow";
 
 // Friendly progressive-message loader shown while AI analysis is in progress.
 const ANALYSIS_MESSAGES = [
@@ -440,7 +447,9 @@ const StyledTakeSelfie = styled(Container)(({ theme }) => ({
 
 const TakeSelfie = () => {
   const { speakMessage } = useVoiceMessages();
-  const [initializing, setInitializing] = useState(false);
+  const [initializing, setInitializing] = useState(true);
+  const [modelsReady, setModelsReady] = useState(false);
+  const modelsReadyRef = useRef(false);
   const [croppedFace, setCroppedFace] = useState(null);
   const [isImageUploading, setIsImageUploading] = useState<boolean>(false);
   const [isAutoAnalyzing, setIsAutoAnalyzing] = useState<boolean>(false);
@@ -463,6 +472,12 @@ const TakeSelfie = () => {
     },
   });
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const consultationFlow = isFreeConsultationFlow(searchParams.get("flow"));
+  const preferredTime = searchParams.get("preferredTime") || "";
+  const preferredTimeLabel = getConsultationTimeLabel(preferredTime);
+  const [showConsultationConfirmed, setShowConsultationConfirmed] = useState(false);
+  const consultationWebhookFiredRef = useRef(false);
 
   const [getRecommnedSkinAttributes, { isLoading: isLoadingSkinAttributes }] =
     useGetRecommnedSkinAttributesMutation();
@@ -486,9 +501,13 @@ const TakeSelfie = () => {
 
   useEffect(() => {
     if (status === "unauthenticated") {
-      router.push("/questionnaire");
+      router.push(
+        consultationFlow
+          ? questionnairePathForFlow(FREE_CONSULTATION_FLOW)
+          : "/questionnaire"
+      );
     }
-  }, [router, status]);
+  }, [router, status, consultationFlow]);
 
   // Welcome message when selfie page loads
   useEffect(() => {
@@ -505,12 +524,70 @@ const TakeSelfie = () => {
     if (skinAttributeStatus?.type === "SUCCESS") {
       if (hasAnnouncedAnalysisSuccessRef.current) return;
       hasAnnouncedAnalysisSuccessRef.current = true;
-      speakMessage("analysisCompleteClickRecommendations");
+      speakMessage(
+        consultationFlow ? "success" : "analysisCompleteClickRecommendations"
+      );
       return;
     }
 
     hasAnnouncedAnalysisSuccessRef.current = false;
-  }, [skinAttributeStatus?.type, speakMessage]);
+  }, [skinAttributeStatus?.type, speakMessage, consultationFlow]);
+
+  const completeConsultationAfterAnalysis = (
+    response: unknown,
+    formValues: { skinType?: string }
+  ) => {
+    setShowConsultationConfirmed(true);
+
+    if (consultationWebhookFiredRef.current) return;
+    consultationWebhookFiredRef.current = true;
+
+    const analysisFields = extractScanAnalysisFields(response);
+    const sessUser = session?.user as Record<string, unknown> | undefined;
+    const phone = String(
+      sessUser?.mobileNumber ||
+        sessUser?.phoneNumber ||
+        sessUser?.phone ||
+        resolvedUserId ||
+        ""
+    );
+
+    const sendWebhook = (machineName: string, machineLocation: string) => {
+      void sendConsultationWebhook({
+        user: {
+          userId: resolvedUserId,
+          name: typeof sessUser?.name === "string" ? sessUser.name : "",
+          email: typeof sessUser?.email === "string" ? sessUser.email : "",
+          phone,
+        },
+        preferredTime: preferredTimeLabel || preferredTime,
+        detectedAttributes: analysisFields.detectedAttributes,
+        keyConcerns: analysisFields.highRecommendation,
+        skinType: formValues?.skinType || analysisFields.skinType,
+        machineName,
+        machineLocation,
+      });
+    };
+
+    fetch("/api/admin/machine-name")
+      .then((res) => res.json())
+      .then((machineData) => {
+        sendWebhook(
+          (machineData?.success && machineData.machineName) ||
+            process.env.NEXT_PUBLIC_MACHINE_NAME ||
+            "Vending Machine",
+          (machineData?.success && machineData.machineLocation) ||
+            process.env.NEXT_PUBLIC_MACHINE_LOCATION ||
+            "LeafWater Vending Machine"
+        );
+      })
+      .catch(() => {
+        sendWebhook(
+          process.env.NEXT_PUBLIC_MACHINE_NAME || "Vending Machine",
+          process.env.NEXT_PUBLIC_MACHINE_LOCATION || "LeafWater Vending Machine"
+        );
+      });
+  };
 
   const extractFaceWithForehead = async (
     imageElement: any,
@@ -550,7 +627,7 @@ const TakeSelfie = () => {
   };
 
   const processImage = async () => {
-    if (!image || !imageRef.current) return;
+    if (!image || !imageRef.current || !modelsReadyRef.current) return;
 
     // Clear previous results
     if (canvasRef.current) {
@@ -649,6 +726,11 @@ const TakeSelfie = () => {
             type: "ERROR",
             message: response?.error?.data?.error,
           });
+        } else if (response?.error) {
+          setSkinAttributeStatus({
+            type: "ERROR",
+            message: response?.error?.message || "Analysis failed. Please try again.",
+          });
         } else {
           update({
             ...session,
@@ -659,11 +741,20 @@ const TakeSelfie = () => {
           });
           setSkinAttributeStatus({
             type: "SUCCESS",
-            message: response?.data?.message,
+            message: response?.data?.message || "Analysis completed successfully!",
           });
+          if (consultationFlow) {
+            completeConsultationAfterAnalysis(response, formValues);
+          }
         }
       })
-      .catch((error) => {});
+      .catch((error) => {
+        console.error("Skin analysis error:", error);
+        setSkinAttributeStatus({
+          type: "ERROR",
+          message: "Analysis failed. Please try again.",
+        });
+      });
   };
 
   const handleGetSkinRecommendations = () => {
@@ -768,8 +859,11 @@ const TakeSelfie = () => {
                     type: "SUCCESS",
                     message: response?.data?.message || "Analysis completed successfully!",
                   });
-                  
-                  // Save scan record to local SQLite database
+
+                  if (consultationFlow) {
+                    completeConsultationAfterAnalysis(response, formValues);
+                  } else {
+                  // Webhook + scan DB are best-effort — never fail the analysis UI
                   try {
                     const analysisFields = extractScanAnalysisFields(response);
                     fetch('/api/admin/scans', {
@@ -830,6 +924,7 @@ const TakeSelfie = () => {
                   } catch (postAnalysisError) {
                     console.warn("[TakeSelfie] Post-analysis webhook/DB step failed:", postAnalysisError);
                   }
+                  }
                 }
               })
               .catch((error) => {
@@ -849,17 +944,43 @@ const TakeSelfie = () => {
   };
 
   useEffect(() => {
+    let cancelled = false;
+
     const loadModels = async () => {
       setInitializing(true);
-      Promise.all([
-        faceapi.nets.tinyFaceDetector.load("/models"),
-        faceapi.nets.faceLandmark68Net.load("/models"),
-        faceapi.nets.faceRecognitionNet.load("/models"),
-      ])
-        .then(() => setInitializing(false))
-        .catch((e) => console.error("Error loading models:", e));
+      setModelsReady(false);
+      modelsReadyRef.current = false;
+
+      try {
+        await Promise.all([
+          faceapi.nets.tinyFaceDetector.loadFromUri("/models"),
+          faceapi.nets.faceLandmark68Net.loadFromUri("/models"),
+          faceapi.nets.faceRecognitionNet.loadFromUri("/models"),
+        ]);
+
+        if (cancelled) return;
+        modelsReadyRef.current = true;
+        setModelsReady(true);
+      } catch (e) {
+        console.error("Error loading face detection models:", e);
+        if (!cancelled) {
+          setSkinAttributeStatus({
+            type: "ERROR",
+            message: "Failed to load face detection. Please refresh and try again.",
+          });
+        }
+      } finally {
+        if (!cancelled) {
+          setInitializing(false);
+        }
+      }
     };
+
     loadModels();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -1022,7 +1143,7 @@ const TakeSelfie = () => {
                         />
                       </Box>
                       {/* Only show button after analysis completes (SUCCESS or ERROR) */}
-                      {skinAttributeStatus?.type === "SUCCESS" && (
+                      {skinAttributeStatus?.type === "SUCCESS" && !consultationFlow && (
                         <Button
                           color="primary"
                           fullWidth
@@ -1089,6 +1210,7 @@ const TakeSelfie = () => {
           <ARCameraComponent
             autoStart={true}
             initializing={initializing}
+            modelsReady={modelsReady}
             disabledSkipBtn={!dataImageInfo}
             onSkip={() => {
               setOpenCamera(!openCamera);
@@ -1122,6 +1244,19 @@ const TakeSelfie = () => {
           </div>
         )}
       </StyledTakeSelfie>
+      {showConsultationConfirmed && (
+        <ConsultationConfirmed
+          phone={String(
+            (session?.user as any)?.mobileNumber ||
+              (session?.user as any)?.phoneNumber ||
+              (session?.user as any)?.phone ||
+              resolvedUserId ||
+              ""
+          )}
+          preferredTimeLabel={preferredTimeLabel}
+          onGoHome={() => router.push(APP_ROUTES.HOME)}
+        />
+      )}
     </PageBackground>
   );
 };

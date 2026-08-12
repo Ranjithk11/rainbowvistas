@@ -40,6 +40,8 @@ export const adminDb = {
 
   // Product Overrides - now using SQLite
   setProductOverride: sqliteDb.setProductOverride.bind(sqliteDb),
+  updateSlotsRetailPriceForProduct: sqliteDb.updateSlotsRetailPriceForProduct.bind(sqliteDb),
+  syncProductInventoryFromSlots: sqliteDb.syncProductInventoryFromSlots.bind(sqliteDb),
   getProductOverride: sqliteDb.getProductOverride.bind(sqliteDb),
   getAllProductOverrides: sqliteDb.getAllProductOverrides.bind(sqliteDb),
 
@@ -119,4 +121,7 @@ export const adminDb = {
   getPosiflyChargesByBill: sqliteDb.getPosiflyChargesByBill.bind(sqliteDb),
   getPosiflyFullBill: sqliteDb.getPosiflyFullBill.bind(sqliteDb),
   getAllPosiflyData: sqliteDb.getAllPosiflyData.bind(sqliteDb),
+
+  previewSalesDuplicates: sqliteDb.previewSalesDuplicates.bind(sqliteDb),
+  dedupeAllSalesData: sqliteDb.dedupeAllSalesData.bind(sqliteDb),
 };

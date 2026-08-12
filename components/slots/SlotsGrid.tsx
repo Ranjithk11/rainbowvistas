@@ -40,7 +40,8 @@ export default function SlotsGrid({ slots, columns = 10, onSelect }: SlotsGridPr
           justifyItems: "center",
           alignItems: "center",
           width: "100%",
-
+          px: 2,
+          py:5
         }}
       >
         {slots.map((slot) => {
@@ -62,8 +63,8 @@ export default function SlotsGrid({ slots, columns = 10, onSelect }: SlotsGridPr
                 if (e.key === "Enter" || e.key === " ") onSelect(slot.slotId);
               }}
               sx={{
-                width: 60,
-                height: 60,
+                width: 70,
+                height: 70,
                 borderRadius: "9999px",
                 display: "flex",
                 alignItems: "center",
@@ -77,7 +78,7 @@ export default function SlotsGrid({ slots, columns = 10, onSelect }: SlotsGridPr
                 "&:active": slot.isAvailable ? { transform: "scale(0.98)" } : undefined,
               }}
             >
-              <Typography sx={{ fontSize: 24, fontWeight: 700, color }}>{slot.slotId}</Typography>
+              <Typography sx={{ fontSize: 26, fontWeight: 700, color }}>{slot.slotId}</Typography>
             </Box>
           );
         })}

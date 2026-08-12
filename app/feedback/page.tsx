@@ -15,17 +15,36 @@ import PageBackground from "@/components/ui/PageBackground";
 import { HelpDialog } from "@/components/ui";
 import VirtualKeyboard from "@/components/ui/VirtualKeyboard";
 import { APP_ROUTES } from "@/utils/routes";
+import { clearSpinWheelSession } from "@/lib/spin-wheel/session";
+import { buildSpinWheelWebhookPayload } from "@/lib/spin-wheel/webhook";
 import { useAppDispatch } from "@/redux/store/store";
 import { clearCart } from "@/redux/reducers/cartSlice";
 import { persistor } from "@/redux/store/store";
 import { useVoiceMessages } from "@/contexts/VoiceContext";
 import DispenseErrorReporter from "./components/DispenseErrorReporter";
-import DispenseReporter from "./components/DispenseReporter";
+import DispenseReporter from "@/components/reporters/DispenseReporter";
 import SendInvoiceEmail from "./components/SendInvoiceEmail";
 import TaxInvoice from "./components/TaxInvoice";
 import FeedbackRating from "./components/FeedbackRating";
-import PaymentReporter from "./components/PaymentReporter";
+import PaymentReporter from "@/components/reporters/PaymentReporter";
 import { buildCheckoutInvoice } from "@/utils/checkoutInvoice";
+import {
+  getMachineFallbackInvoiceEmail,
+  resolveInvoiceRecipientEmail,
+} from "@/utils/invoiceEmail";
+import {
+  mergeMachineContext,
+  getWebhookUserId,
+  getWalkInDisplayName,
+} from "@/lib/machineContext";
+import { resolveCheckoutPaymentClient } from "@/lib/checkoutPaymentResolve";
+import {
+  sendDispenseErrorWebhook,
+  sendDispenseSuccessWebhook,
+} from "@/utils/webhook";
+
+/** STM32 / network hang: fail with dispense_error instead of staying silent. */
+const DISPENSE_TIMEOUT_MS = 90_000;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -57,28 +76,18 @@ function numberToWords(num: number): string {
   return result;
 }
 
-function generateInvoiceNo(orderId?: string): string {
-  const now = new Date();
-  const mm = String(now.getMonth() + 1).padStart(2, "0");
-  const yy = String(now.getFullYear()).slice(-2);
-  const seq = orderId ? orderId.replace(/\D/g, "").slice(-3).padStart(3, "0") : "001";
-  return `LW/${mm}/${yy}/${seq}`;
-}
-
 function formatDate(d: Date): string {
   const day = d.getDate();
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   return `${day}-${months[d.getMonth()]}-${String(d.getFullYear()).slice(-2)}`;
 }
 
-const parsePrice = (priceText?: string): number => {
-  if (!priceText) return 0;
-  const normalized = String(priceText).replace(/,/g, " ");
-  const match = normalized.match(/(\d+(?:\.\d+)?)/);
-  if (!match) return 0;
-  const num = Number(match[1]);
-  return Number.isFinite(num) ? num : 0;
-};
+async function enrichCheckoutPayment(summary: any): Promise<any> {
+  if (!summary?.payment) return summary;
+  const resolved = await resolveCheckoutPaymentClient(summary.payment, 8);
+  if (!resolved || resolved === summary.payment) return summary;
+  return { ...summary, payment: resolved };
+}
 
 // ---------------------------------------------------------------------------
 // Component
@@ -119,6 +128,8 @@ export default function FeedbackPage() {
   const [isSendingEmail, setIsSendingEmail] = useState(false);
   const [emailSent, setEmailSent] = useState(false);
   const [emailError, setEmailError] = useState<string>("");
+  // Stable unique invoice number allocated server-side (SQLite monthly sequence)
+  const [invoiceNo, setInvoiceNo] = useState<string>("");
 
   // Keyboard target: which field the virtual keyboard is typing into
   const [keyboardTarget, setKeyboardTarget] = useState<"notes" | "email">("notes");
@@ -126,9 +137,11 @@ export default function FeedbackPage() {
   // Notification state
   const [notification, setNotification] = useState<{ message: string; type: "success" | "error" } | null>(null);
   const emailFieldRef = useRef<HTMLDivElement>(null);
+  const emailInitializedRef = useRef(false);
 
   // Machine info (fallback when no user session, e.g. direct purchase from /products or /slots)
   const [machineInfo, setMachineInfo] = useState<{ machineId: string; machineName: string; machineLocation: string } | null>(null);
+  const [machineInfoReady, setMachineInfoReady] = useState(false);
 
   useEffect(() => {
     fetch("/api/admin/machine-name")
@@ -142,7 +155,8 @@ export default function FeedbackPage() {
           });
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => setMachineInfoReady(true));
   }, []);
 
   // Tax Invoice accordion
@@ -170,6 +184,7 @@ export default function FeedbackPage() {
       }
       dispatch(clearCart());
       await persistor.purge();
+      clearSpinWheelSession();
       try {
         await signOut({ redirect: false });
       } catch {}
@@ -181,20 +196,25 @@ export default function FeedbackPage() {
   useEffect(() => {
     if (typeof window === "undefined") return;
 
-    try {
-      const raw = window.sessionStorage.getItem("kiosk_checkout_summary");
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      setCheckoutSummary(parsed);
+    const loadCheckout = async () => {
       try {
-        window.sessionStorage.removeItem("kiosk_checkout_summary");
+        const raw = window.sessionStorage.getItem("kiosk_checkout_summary");
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        const enriched = await enrichCheckoutPayment(parsed);
+        setCheckoutSummary(enriched);
+        try {
+          window.sessionStorage.removeItem("kiosk_checkout_summary");
+        } catch {
+        }
       } catch {
       }
-    } catch {
-    }
+    };
+
+    void loadCheckout();
     dispatch(clearCart());
     void persistor.purge();
-  }, []);
+  }, [dispatch]);
 
   useEffect(() => {
     if (hasAnnouncedFeedbackPromptRef.current) return;
@@ -205,6 +225,11 @@ export default function FeedbackPage() {
 
     return () => window.clearTimeout(t);
   }, [speakMessage]);
+
+  const isSubmittingRef = useRef(isSubmitting);
+  isSubmittingRef.current = isSubmitting;
+  const goHomeRef = useRef(goHome);
+  goHomeRef.current = goHome;
 
   // Start 60s auto-home timer only after dispense succeeds
   useEffect(() => {
@@ -218,8 +243,8 @@ export default function FeedbackPage() {
 
     autoHomeTimerRef.current = window.setTimeout(() => {
       if (hasCompletedRef.current) return;
-      if (isSubmitting) return;
-      void goHome();
+      if (isSubmittingRef.current) return;
+      void goHomeRef.current();
     }, 180_000);
 
     return () => {
@@ -266,6 +291,70 @@ export default function FeedbackPage() {
     return Array.isArray(items) ? items : [];
   }, [checkoutSummary]);
 
+  const mergedMachine = useMemo(
+    () =>
+      mergeMachineContext(
+        machineInfo,
+        checkoutSummary?.payment,
+        session?.user as { machineId?: string; machineName?: string; machineLocation?: string }
+      ),
+    [machineInfo, checkoutSummary?.payment, session?.user]
+  );
+
+  const webhookUserId = useMemo(
+    () => getWebhookUserId(session, mergedMachine),
+    [session, mergedMachine]
+  );
+
+  const webhookUser = useMemo(
+    () => ({
+      userId: webhookUserId,
+      name: getWalkInDisplayName(session, mergedMachine),
+      email: (session?.user as any)?.email || "",
+      phone:
+        (session?.user as any)?.mobileNumber ||
+        (session?.user as any)?.phoneNumber ||
+        (session?.user as any)?.phone ||
+        "",
+    }),
+    [session, mergedMachine, webhookUserId]
+  );
+
+  const spinWheelWebhookData = useMemo(
+    () =>
+      buildSpinWheelWebhookPayload({
+        reward: checkoutSummary?.spinWheelReward,
+        couponApplied:
+          checkoutSummary?.couponApplied ??
+          Boolean(checkoutSummary?.discount && checkoutSummary?.spinWheelReward),
+        discountAmount: checkoutSummary?.discount,
+        cartTotal: checkoutSummary?.total,
+        payableTotal: checkoutSummary?.payableTotal,
+        appliedAt: checkoutSummary?.createdAt,
+      }),
+    [checkoutSummary]
+  );
+
+  const dispenseSuccessCommand = useMemo(() => {
+    if (dispenseState.status !== "done") return null;
+    const results = Array.isArray((dispenseState as { results?: unknown }).results)
+      ? ((dispenseState as { results: Array<{ productCode?: string; ok?: boolean }> }).results)
+      : [];
+    const firstOk = results.find(
+      (r) => r?.ok && String(r?.productCode || "").toUpperCase() !== "TRAY"
+    );
+    const item = checkoutItems[0];
+    const slotId = item?.slotId || firstOk?.productCode || "";
+
+    return {
+      productId: item?.id || "",
+      productName: item?.name || "",
+      slotId,
+      command: firstOk?.productCode ? `RQ${firstOk.productCode}` : "DISPENSE",
+      timestamp: new Date().toISOString(),
+    };
+  }, [dispenseState, checkoutItems]);
+
   const handleKeyboardKeyPress = (key: string) => {
     const setter = keyboardTarget === "email" ? setUserEmail : setNotes;
 
@@ -280,7 +369,8 @@ export default function FeedbackPage() {
     if (key === "return") {
       if (keyboardTarget === "email") {
         setIsKeyboardOpen(false);
-        handleEmailEditConfirm();
+        setIsEditingEmail(false);
+        setKeyboardTarget("notes");
       } else {
         setter((prev) => `${prev}\n`);
         setIsKeyboardOpen(false);
@@ -293,40 +383,10 @@ export default function FeedbackPage() {
     setter((prev) => `${prev}${key}`);
   };
 
-  const handleEmailEditConfirm = async () => {
+  const handleEmailEditConfirm = () => {
     setIsEditingEmail(false);
     setIsKeyboardOpen(false);
     setKeyboardTarget("notes");
-
-    if (!userEmail || !userEmail.includes("@")) return;
-
-    const uid = (session?.user as any)?.id;
-    if (!uid) return;
-
-    try {
-      const res = await fetch("/api/user/update-email", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userId: uid,
-          email: userEmail,
-          name: (session?.user as any)?.name || "",
-          phoneNumber: (session?.user as any)?.mobileNumber || (session?.user as any)?.phoneNumber || "",
-          countryCode: "91",
-          onBoardingQuestions: (session?.user as any)?.onBoardingQuestions || [],
-        }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setNotification({ message: "User details updated successfully", type: "success" });
-      } else {
-        setNotification({ message: data.error || "Failed to update email", type: "error" });
-      }
-    } catch (err: any) {
-      setNotification({ message: err.message || "Failed to update", type: "error" });
-    }
-
-    setTimeout(() => setNotification(null), 3000);
   };
 
   useEffect(() => {
@@ -335,6 +395,67 @@ export default function FeedbackPage() {
       if (!checkoutSummary) return;
       if (checkoutItems.length === 0) return;
       setDispenseState({ status: "running" });
+
+      const payment = checkoutSummary?.payment;
+      const productsForWebhook = checkoutItems.map((item: any) => ({
+        id: item?.id,
+        name: item?.name,
+        quantity: item?.quantity,
+        slotId: item?.slotId,
+        retailPrice: item?.retail_price,
+        amount: item?.amount,
+      }));
+
+      const fireError = async (message: string, raw?: unknown) => {
+        setDispenseState({ status: "error", message });
+        const resolvedTx =
+          (await resolveCheckoutPaymentClient(payment, 4)) || payment;
+        void sendDispenseErrorWebhook({
+          errorMessage: message,
+          user: webhookUser,
+          products: productsForWebhook,
+          payment: resolvedTx,
+          raw,
+          machineLocation: mergedMachine.machineLocation,
+          machineName: mergedMachine.machineName || "Vending Machine",
+        });
+      };
+
+      const fireSuccess = async (results: unknown) => {
+        setDispenseState({ status: "done", results });
+        const resolvedTx =
+          (await resolveCheckoutPaymentClient(payment, 4)) || payment;
+        const resultList = Array.isArray(results)
+          ? (results as Array<{ productCode?: string; ok?: boolean }>)
+          : [];
+        const firstOk = resultList.find(
+          (r) => r?.ok && String(r?.productCode || "").toUpperCase() !== "TRAY"
+        );
+        const item = checkoutItems[0];
+        const slotId = item?.slotId || firstOk?.productCode || "";
+        void sendDispenseSuccessWebhook({
+          user: webhookUser,
+          products: productsForWebhook,
+          transaction: resolvedTx,
+          command: {
+            productId: item?.id || "",
+            productName: item?.name || "",
+            slotId,
+            command: firstOk?.productCode
+              ? `RQ${firstOk.productCode}`
+              : slotId
+                ? `RQ${slotId}`
+                : "DISPENSE",
+            timestamp: new Date().toISOString(),
+          },
+          agentName: payment?.agentName,
+          machineLocation: mergedMachine.machineLocation,
+          machineName: mergedMachine.machineName || "Vending Machine",
+        });
+      };
+
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), DISPENSE_TIMEOUT_MS);
 
       try {
         const productCodes: string[] = [];
@@ -355,7 +476,7 @@ export default function FeedbackPage() {
           const encodedName = encodeURIComponent(name);
           const slotsUrl = `/api/admin/products/${cleanProductId || "unknown"}/slots?name=${encodedName}`;
 
-          const slotsResponse = await fetch(slotsUrl);
+          const slotsResponse = await fetch(slotsUrl, { signal: controller.signal });
           const slotsData = await slotsResponse.json();
           const slots = Array.isArray(slotsData?.slots) ? slotsData.slots : [];
           
@@ -398,7 +519,7 @@ export default function FeedbackPage() {
         }
 
         if (productCodes.length === 0) {
-          setDispenseState({ status: "error", message: "No slots found for dispensing" });
+          await fireError("No slots found for dispensing");
           return;
         }
 
@@ -406,22 +527,36 @@ export default function FeedbackPage() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ productCodes }),
+          signal: controller.signal,
         });
         const result = await response.json();
         if (!response.ok || !result?.success) {
           const msg = result?.error?.message || "Dispense failed";
-          setDispenseState({ status: "error", message: msg });
+          await fireError(msg, result);
           return;
         }
 
-        setDispenseState({ status: "done", results: result?.data?.results });
+        await fireSuccess(result?.data?.results);
       } catch (e: any) {
-        setDispenseState({ status: "error", message: e?.message || "Dispense failed" });
+        const aborted = e?.name === "AbortError" || controller.signal.aborted;
+        const msg = aborted
+          ? `Dispense timed out after ${Math.round(DISPENSE_TIMEOUT_MS / 1000)}s`
+          : e?.message || "Dispense failed";
+        await fireError(msg, e);
+      } finally {
+        window.clearTimeout(timeoutId);
       }
     };
 
     void run();
-  }, [checkoutItems, checkoutSummary, dispenseState.status]);
+  }, [
+    checkoutItems,
+    checkoutSummary,
+    dispenseState.status,
+    webhookUser,
+    mergedMachine.machineLocation,
+    mergedMachine.machineName,
+  ]);
 
   const handleStarClick = (starIndex: number) => {
     setRating(starIndex);
@@ -496,15 +631,57 @@ export default function FeedbackPage() {
   const displayRating = hoveredRating || rating;
   const canSubmit = rating > 0 && !isSubmitting;
 
-  // Initialize email from session
+  // Initialize email once from session, or machine-location fallback when phone-only / walk-in
   useEffect(() => {
-    const email = (session?.user as any)?.email;
-    if (email && !userEmail) setUserEmail(email);
-  }, [session]);
+    if (!machineInfoReady || emailInitializedRef.current) return;
+
+    const sessionEmail = ((session?.user as any)?.email || "").trim();
+    if (sessionEmail.includes("@")) {
+      setUserEmail(sessionEmail);
+    } else {
+      setUserEmail(
+        getMachineFallbackInvoiceEmail(
+          machineInfo?.machineId,
+          machineInfo?.machineLocation
+        )
+      );
+    }
+    emailInitializedRef.current = true;
+  }, [session, machineInfo, machineInfoReady]);
+
+  // Allocate a unique invoice number once per payment/order (idempotent on server).
+  useEffect(() => {
+    if (!checkoutSummary?.payment || invoiceNo) return;
+    const orderId = String(checkoutSummary.payment.orderId || "").trim();
+    const paymentId = String(checkoutSummary.payment.paymentId || "").trim();
+    const qrCodeId = String(checkoutSummary.payment.qrCodeId || "").trim();
+    if (!orderId && !paymentId && !qrCodeId) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/invoice/allocate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ orderId, paymentId, qrCodeId }),
+        });
+        const data = await res.json();
+        if (!cancelled && data?.success && data?.invoiceNo) {
+          setInvoiceNo(String(data.invoiceNo));
+        }
+      } catch (err) {
+        console.warn("[FeedbackPage] Invoice number allocate failed:", err);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [checkoutSummary, invoiceNo]);
 
   const buildInvoicePayload = useCallback(
     (buyerEmailOverride?: string) => {
-      if (!checkoutSummary) return null;
+      if (!checkoutSummary || !invoiceNo) return null;
       const now = new Date();
       const orderId = checkoutSummary?.payment?.orderId || "";
       const buyerEmail = buyerEmailOverride ?? (session?.user as any)?.email ?? "";
@@ -512,7 +689,7 @@ export default function FeedbackPage() {
       return buildCheckoutInvoice({
         checkoutSummary,
         checkoutItems,
-        invoiceNo: generateInvoiceNo(orderId),
+        invoiceNo,
         invoiceDate: formatDate(now),
         orderReference: orderId ? `${orderId} dated ${formatDate(now)}` : formatDate(now),
         amountInWords: numberToWords,
@@ -530,9 +707,18 @@ export default function FeedbackPage() {
         machineId: machineInfo?.machineId || "",
         machineName: machineInfo?.machineName || "",
         machineLocation: machineInfo?.machineLocation || "",
+        command: dispenseSuccessCommand
+          ? {
+              productId: dispenseSuccessCommand.productId,
+              productName: dispenseSuccessCommand.productName,
+              slotId: String(dispenseSuccessCommand.slotId || ""),
+              command: dispenseSuccessCommand.command,
+              timestamp: dispenseSuccessCommand.timestamp,
+            }
+          : undefined,
       });
     },
-    [checkoutSummary, checkoutItems, session, machineInfo]
+    [checkoutSummary, checkoutItems, session, machineInfo, dispenseSuccessCommand, invoiceNo]
   );
 
   const invoiceData = useMemo(() => buildInvoicePayload(), [buildInvoicePayload]);
@@ -546,21 +732,25 @@ export default function FeedbackPage() {
     return response.json();
   }, []);
 
-  // Auto-send only when the user already has a valid email on session (skip noreply / empty).
+  // Auto-send once after checkout: session email, or {machineLocation}@gmail.com fallback
   const invoiceWebhookFiredRef = useRef(false);
   useEffect(() => {
-    if (!invoiceData || invoiceWebhookFiredRef.current) return;
-    const sessionEmail = ((session?.user as any)?.email || "").trim();
-    if (!sessionEmail.includes("@")) return;
+    if (!invoiceData || !machineInfoReady || invoiceWebhookFiredRef.current) return;
+
+    const recipientEmail = resolveInvoiceRecipientEmail(
+      (session?.user as any)?.email,
+      machineInfo?.machineId,
+      machineInfo?.machineLocation
+    );
 
     invoiceWebhookFiredRef.current = true;
-    const invoicePayload = buildInvoicePayload(sessionEmail);
+    const invoicePayload = buildInvoicePayload(recipientEmail);
     if (!invoicePayload) return;
 
-    postInvoiceEmail(sessionEmail, invoicePayload)
+    postInvoiceEmail(recipientEmail, invoicePayload)
       .then((result) => {
         if (result.success) {
-          console.log("[FeedbackPage] Invoice webhook auto-sent to session email");
+          console.log("[FeedbackPage] Invoice webhook auto-sent to", recipientEmail);
         } else {
           console.warn("[FeedbackPage] Invoice webhook failed:", result.error);
         }
@@ -568,7 +758,7 @@ export default function FeedbackPage() {
       .catch((err) => {
         console.warn("[FeedbackPage] Invoice webhook error:", err);
       });
-  }, [invoiceData, session, buildInvoicePayload, postInvoiceEmail]);
+  }, [invoiceData, machineInfoReady, session, machineInfo, buildInvoicePayload, postInvoiceEmail]);
 
   const handleSendEmail = async () => {
     const nextEmail = userEmail.trim();
@@ -579,36 +769,7 @@ export default function FeedbackPage() {
     setEmailError("");
 
     try {
-      const uid = (session?.user as any)?.id;
-      const sessionEmail = ((session?.user as any)?.email || "").trim().toLowerCase();
-      const emailChanged = nextEmail.toLowerCase() !== sessionEmail;
-
-      if (uid && emailChanged) {
-        try {
-          const res = await fetch("/api/user/update-email", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              userId: uid,
-              email: nextEmail,
-              name: (session?.user as any)?.name || "",
-              phoneNumber:
-                (session?.user as any)?.mobileNumber ||
-                (session?.user as any)?.phoneNumber ||
-                "",
-              countryCode: "91",
-              onBoardingQuestions: (session?.user as any)?.onBoardingQuestions || [],
-            }),
-          });
-          const data = await res.json();
-          if (!data.success) {
-            console.warn("[FeedbackPage] Email profile update failed:", data.error);
-          }
-        } catch (updateErr) {
-          console.warn("[FeedbackPage] Email profile update error:", updateErr);
-        }
-      }
-
+      // Invoice email only — do not call /api/user/update-email here; SAVE_USER sends OTP, not invoice.
       const invoiceWithUser = buildInvoicePayload(nextEmail);
       if (!invoiceWithUser) {
         setEmailError("Invoice data is not available");
@@ -647,15 +808,10 @@ export default function FeedbackPage() {
   return (
     <PageBackground fitParent>
       {/* Payment webhook safety net — fires once per orderId if cartProduct unmounted too fast */}
-      {checkoutSummary?.payment?.orderId && (
+      {(checkoutSummary?.payment?.orderId || checkoutSummary?.payment?.paymentId) && (
         <PaymentReporter
           active
-          user={{
-            userId: (session?.user as any)?.id || machineInfo?.machineId || "",
-            name: (session?.user as any)?.name || `Walk-in – ${machineInfo?.machineName || "Vending Machine"}`,
-            email: (session?.user as any)?.email || "",
-            phone: (session?.user as any)?.mobileNumber || (session?.user as any)?.phoneNumber || (session?.user as any)?.phone || "",
-          }}
+          user={webhookUser}
           products={checkoutItems.map((item: any) => ({
             id: item?.id,
             name: item?.name,
@@ -665,8 +821,9 @@ export default function FeedbackPage() {
             amount: item?.amount,
           }))}
           transaction={checkoutSummary?.payment}
-          machineLocation={machineInfo?.machineLocation || machineLocation}
-          machineName={machineInfo?.machineName || "Vending Machine"}
+          machineLocation={mergedMachine.machineLocation}
+          machineName={mergedMachine.machineName || "Vending Machine"}
+          spinWheel={spinWheelWebhookData}
         />
       )}
       <Box
@@ -785,25 +942,16 @@ export default function FeedbackPage() {
               <>
                 <DispenseReporter
                   active
-                  user={{
-                    userId: (session?.user as any)?.id || machineInfo?.machineId || "",
-                    name: (session?.user as any)?.name || `Walk-in – ${machineInfo?.machineName || "Vending Machine"}`,
-                    email: (session?.user as any)?.email || "",
-                    phone: (session?.user as any)?.mobileNumber || (session?.user as any)?.phoneNumber || (session?.user as any)?.phone || "",
-                  }}
+                  user={webhookUser}
                   products={checkoutItems.map((item: any) => ({
                     id: item?.id, name: item?.name, quantity: item?.quantity,
                     slotId: item?.slotId, retailPrice: item?.retail_price, amount: item?.amount,
                   }))}
                   transaction={checkoutSummary?.payment}
-                  command={{
-                    productId: (dispenseState.results as any)?.productId || checkoutItems[0]?.id,
-                    productName: (dispenseState.results as any)?.productName || checkoutItems[0]?.name,
-                    slotId: (dispenseState.results as any)?.slotId || checkoutItems[0]?.slotId || (checkoutItems[0]?.id?.replace(/^products\//, "")),
-                    command: (dispenseState.results as any)?.command || "DISPENSE",
-                    timestamp: new Date().toISOString(),
-                  }}
-                  machineLocation={machineLocation}
+                  command={dispenseSuccessCommand || undefined}
+                  agentName={checkoutSummary?.payment?.agentName}
+                  machineLocation={mergedMachine.machineLocation}
+                  machineName={mergedMachine.machineName || "Vending Machine"}
                 />
                 {pickupTimer > 0 && (
                   <Box sx={{ bgcolor: "#fef3c7", borderRadius: 2, border: "2px solid #f59e0b", textAlign: "center", p: 2 }}>
@@ -821,19 +969,15 @@ export default function FeedbackPage() {
                 <DispenseErrorReporter
                   active
                   errorMessage={dispenseState.message}
-                  user={{
-                    userId: (session?.user as any)?.id || machineInfo?.machineId || "",
-                    name: (session?.user as any)?.name || `Walk-in – ${machineInfo?.machineName || "Vending Machine"}`,
-                    email: (session?.user as any)?.email || "",
-                    phone: (session?.user as any)?.mobileNumber || (session?.user as any)?.phoneNumber || (session?.user as any)?.phone || "",
-                  }}
+                  user={webhookUser}
                   products={checkoutItems.map((item: any) => ({
                     id: item?.id, name: item?.name, quantity: item?.quantity,
                     slotId: item?.slotId, retailPrice: item?.retail_price, amount: item?.amount,
                   }))}
                   payment={checkoutSummary?.payment}
                   raw={dispenseState}
-                  machineLocation={machineLocation}
+                  machineLocation={mergedMachine.machineLocation}
+                  machineName={mergedMachine.machineName || "Vending Machine"}
                 />
                 <Box sx={{ bgcolor: "#fef2f2", borderRadius: 2, border: "2px solid #ef4444", p: 2 }}>
                   <Typography sx={{ fontSize: 24, fontWeight: 700, color: "#b91c1c", mb: 1 }}>
@@ -848,7 +992,7 @@ export default function FeedbackPage() {
                       Your amount will be refunded to your original payment method. Our team will get back to you shortly.
                     </Typography>
                     <Typography sx={{ fontSize: 24, color: "#6b7280", mt: 1, fontStyle: "italic" }}>
-                      For immediate assistance: +91 8008675263
+                      For immediate assistance: +91 8977016605
                     </Typography>
                   </Box>
                 </Box>
@@ -868,6 +1012,8 @@ export default function FeedbackPage() {
             emailFieldRef={emailFieldRef}
             onEditStart={() => {
               setIsEditingEmail(true);
+              setEmailSent(false);
+              setEmailError("");
               setKeyboardTarget("email");
               setIsKeyboardOpen(true);
               setTimeout(() => { emailFieldRef.current?.scrollIntoView({ behavior: "smooth", block: "center" }); }, 100);
