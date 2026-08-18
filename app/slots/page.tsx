@@ -388,7 +388,7 @@ export default function SlotsPage() {
             zIndex: 1,
             maxWidth: 960,
             mx: "auto",
-            pt: 17,
+            pt: { xs: 14, md: 20 },
             px: { xs: 2, sm: 3, md: 4 },
             pb: 4,
           }}

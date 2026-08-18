@@ -3,10 +3,11 @@
 .stage {
   width: 100%;
   min-height: 100dvh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 110px 32px 28px;
+  padding: 168px 40px 36px;
   position: relative;
   overflow-x: hidden;
   overflow-y: auto;
@@ -18,22 +19,24 @@
   color: #5a3040;
   user-select: none;
   font-family: "Montserrat", system-ui, sans-serif;
+  box-sizing: border-box;
 }
 
 .header {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: clamp(12px, 3vw, 28px);
-  margin-bottom: 6px;
+  gap: clamp(12px, 3vw, 32px);
+  margin-bottom: 8px;
   text-align: left;
+  flex-shrink: 0;
 }
 
 .giftWrap {
   position: relative;
   flex-shrink: 0;
-  width: clamp(96px, 15vw, 140px);
-  height: clamp(96px, 15vw, 140px);
+  width: clamp(110px, 14vw, 168px);
+  height: clamp(110px, 14vw, 168px);
   display: flex;
   align-items: flex-end;
   justify-content: center;
@@ -178,7 +181,7 @@
 
 .title {
   font-family: "Cormorant Garamond", Georgia, serif;
-  font-size: clamp(42px, 8vw, 66px);
+  font-size: clamp(48px, 7.2vw, 84px);
   line-height: 0.95;
   letter-spacing: 2px;
   color: #9e1b3d;
@@ -187,18 +190,18 @@
 
 .title span {
   display: block;
-  font-size: clamp(30px, 6vw, 46px);
+  font-size: clamp(34px, 5.4vw, 58px);
   letter-spacing: 4px;
 }
 
 .ribbon {
-  margin: 14px 0 0;
+  margin: 16px 0 0;
   display: inline-block;
-  padding: 9px 34px;
-  border-radius: 6px;
+  padding: 12px 42px;
+  border-radius: 8px;
   background: linear-gradient(90deg, #c2325a, #9e1b3d);
   color: #fff;
-  font-size: 15px;
+  font-size: 20px;
   font-weight: 700;
   letter-spacing: 3px;
   box-shadow: 0 6px 16px rgba(158, 27, 61, 0.25);
@@ -261,9 +264,10 @@
 
 .wheelWrap {
   position: relative;
-  width: min(600px, 92vw);
-  height: min(600px, 92vw);
-  margin: 26px 0 10px;
+  width: min(780px, 78vw, 42dvh);
+  height: min(780px, 78vw, 42dvh);
+  margin: 18px 0 8px;
+  flex-shrink: 0;
 }
 
 .wheel {
@@ -294,8 +298,8 @@
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: min(150px, 25vw);
-  height: min(150px, 25vw);
+  width: min(180px, 23vw);
+  height: min(180px, 23vw);
   border-radius: 50%;
   background: radial-gradient(circle at 35% 30%, #c33357, #9e1b3d 60%, #7c1230);
   border: 7px solid #e8b84b;
@@ -305,7 +309,7 @@
     inset 0 -6px 14px rgba(0, 0, 0, 0.25);
   color: #fff;
   font-weight: 800;
-  font-size: clamp(16px, 3vw, 23px);
+  font-size: clamp(18px, 2.4vw, 28px);
   line-height: 1.1;
   letter-spacing: 1px;
   display: flex;
@@ -326,26 +330,39 @@
   pointer-events: none;
 }
 
+.belowWheel {
+  width: 100%;
+  max-width: 980px;
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-evenly;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding-top: 12px;
+}
+
 .steps {
   display: flex;
-  gap: 14px;
+  gap: 22px;
   width: 100%;
-  max-width: 720px;
-  margin-top: 6px;
+  max-width: 980px;
+  margin-top: 0;
 }
 
 .step {
   flex: 1;
   background: #fff;
   border: 1px solid #f0dde2;
-  border-radius: 14px;
-  padding: 18px 12px 16px;
+  border-radius: 18px;
+  padding: 28px 16px 24px;
   text-align: center;
   box-shadow: 0 4px 14px rgba(158, 27, 61, 0.06);
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
+  gap: 14px;
 }
 
 .step b {
@@ -366,8 +383,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 52px;
-  height: 52px;
+  width: 72px;
+  height: 72px;
   border-radius: 50%;
   background: #fdf2f5;
   border: 2px solid #f3c4d0;
@@ -376,22 +393,22 @@
 
 .step p {
   margin: 0;
-  font-size: 14px;
+  font-size: 20px;
   line-height: 1.35;
   font-weight: 600;
   color: #7a4757;
 }
 
 .cta {
-  margin-top: 22px;
-  width: min(420px, 90vw);
-  height: 74px;
+  margin-top: 8px;
+  width: min(760px, 92vw);
+  height: 96px;
   border: none;
-  border-radius: 40px;
+  border-radius: 48px;
   background: linear-gradient(90deg, #c2325a, #8e1638);
   border: 3px solid #e8b84b;
   color: #fff;
-  font-size: 26px;
+  font-size: 32px;
   font-weight: 800;
   letter-spacing: 2px;
   cursor: pointer;
@@ -411,8 +428,8 @@
 }
 
 .tc {
-  margin-top: 10px;
-  font-size: 12px;
+  margin-top: 4px;
+  font-size: 18px;
   color: #a98292;
   font-weight: 600;
 }
@@ -532,12 +549,12 @@
 }
 
 .backLink {
-  margin-top: 18px;
+  margin-top: 4px;
   background: transparent;
   border: none;
   color: #9e1b3d;
   font-weight: 700;
-  font-size: 16px;
+  font-size: 24px;
   cursor: pointer;
   text-decoration: underline;
 }

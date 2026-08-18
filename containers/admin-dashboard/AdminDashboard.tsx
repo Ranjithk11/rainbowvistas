@@ -143,7 +143,7 @@ export default function AdminDashboard({
           secondButtonIcon="/icons/logout.svg"
         />
 
-        <Box sx={{ height: 100 }} />
+        <Box sx={{ height: { xs: 100, md: 160 } }} />
 
         <DashboardTitle
           onDashboardClick={onDashboardClick}

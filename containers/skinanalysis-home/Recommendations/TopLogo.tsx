@@ -31,8 +31,8 @@ interface TopLogoProps {
   pulseSecondButton?: boolean;
 }
 
-const ACTION_ICON_SIZE = 28;
-const LOGO_BAR_HEIGHT = 80;
+const ACTION_ICON_SIZE = 36;
+const LOGO_BAR_HEIGHT = { xs: 72, sm: 80, md: 108 };
 
 const renderSecondButtonIcon = (
   icon: string,
@@ -68,17 +68,17 @@ const renderSecondButtonIcon = (
 const baseActionButtonSx = {
   width: "fit-content",
   minWidth: "unset",
-  px: 2.25,
-  py: 1.5,
+  px: { xs: 2.25, md: 3.5 },
+  py: { xs: 1.5, md: 1.85 },
   borderRadius: "64px",
   textTransform: "none" as const,
   flexShrink: 0,
   display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",
-  gap: 1,
+  gap: { xs: 1, md: 1.5 },
   whiteSpace: "nowrap" as const,
-  fontSize: 26,
+  fontSize: { xs: 24, md: 32 },
   fontWeight: 500,
   lineHeight: 1.2,
   borderWidth: "1px",
@@ -97,11 +97,11 @@ const actionIconSx = {
   justifyContent: "center",
   flexShrink: 0,
   lineHeight: 0,
-  width: ACTION_ICON_SIZE,
-  height: ACTION_ICON_SIZE,
+  width: { xs: 28, md: ACTION_ICON_SIZE },
+  height: { xs: 28, md: ACTION_ICON_SIZE },
   "& img, & svg": {
-    width: ACTION_ICON_SIZE,
-    height: ACTION_ICON_SIZE,
+    width: { xs: 28, md: ACTION_ICON_SIZE },
+    height: { xs: 28, md: ACTION_ICON_SIZE },
   },
 };
 
@@ -144,16 +144,16 @@ const TopLogo: React.FC<TopLogoProps> = ({
     <Box
       sx={{
         position: isKiosk ? "absolute" : "fixed",
-        top: 10,
-        left: 12,
-        right: 12,
+        top: { xs: 10, md: 16 },
+        left: { xs: 12, md: 24 },
+        right: { xs: 12, md: 24 },
         zIndex: 10,
       }}
     >
       <Box
         sx={{
-          px: 2,
-          py: 1.75,
+          px: { xs: 2, md: 3.5 },
+          py: { xs: 1.5, md: 2.25 },
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
@@ -221,7 +221,7 @@ const TopLogo: React.FC<TopLogoProps> = ({
                 onClick={handleLogoClick}
                 sx={{
                   position: "relative",
-                  width: 320,
+                  width: { xs: 256, sm: 320, md: 460 },
                   height: LOGO_BAR_HEIGHT,
                   flexShrink: 1,
                   cursor: "pointer",
@@ -231,7 +231,7 @@ const TopLogo: React.FC<TopLogoProps> = ({
                   src="/wending/goldlog.svg"
                   alt=""
                   fill
-                  sizes="280px"
+                  sizes="(min-width: 900px) 460px, 320px"
                   style={{ objectFit: "contain" }}
                 />
               </Box>
@@ -242,7 +242,7 @@ const TopLogo: React.FC<TopLogoProps> = ({
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "flex-end",
-                gap: 2,
+                gap: { xs: 2, md: 2.5 },
                 flexShrink: 0,
                 minWidth: 0,
               }}
@@ -367,7 +367,7 @@ const TopLogo: React.FC<TopLogoProps> = ({
                   <Box
                     component="span"
                     sx={{
-                      fontSize:18,
+                      fontSize: { xs: 16, md: 20 },
                       fontWeight: 400,
                       color:
                         hasActiveReward || pulseSecondButton

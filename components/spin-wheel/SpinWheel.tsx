@@ -570,61 +570,63 @@ export default function SpinWheel({ onContinue }: SpinWheelProps) {
         </button>
       </div>
 
-      <div className={styles.steps}>
-        <div className={styles.step}>
-          <span className={styles.stepIcon} aria-hidden>
-            <Icon icon="mdi:gesture-tap" width={30} height={30} />
-          </span>
-          <p>Tap SPIN NOW to spin the wheel</p>
+      <div className={styles.belowWheel}>
+        <div className={styles.steps}>
+          <div className={styles.step}>
+            <span className={styles.stepIcon} aria-hidden>
+              <Icon icon="mdi:gesture-tap" width={42} height={42} />
+            </span>
+            <p>Tap SPIN NOW to spin the wheel</p>
+          </div>
+          <div className={styles.step}>
+            <span className={styles.stepIcon} aria-hidden>
+              <Icon icon="mdi:gift" width={42} height={42} />
+            </span>
+            <p>Win amazing offers and discounts</p>
+          </div>
+          <div className={styles.step}>
+            <span className={styles.stepIcon} aria-hidden>
+              <Icon icon="mdi:shopping" width={42} height={42} />
+            </span>
+            <p>Make your purchase and enjoy your reward</p>
+          </div>
         </div>
-        <div className={styles.step}>
-          <span className={styles.stepIcon} aria-hidden>
-            <Icon icon="mdi:gift" width={30} height={30} />
+
+        <button type="button" className={styles.cta} onClick={spin} disabled={spinDisabled}>
+          SPIN NOW &nbsp;&rsaquo;
+        </button>
+        <div className={styles.tc}>*T&amp;C Apply</div>
+
+        {hasSpun && reward && !nextPurchaseOpen ? (
+          <div className={styles.existingReward}>
+            <div className={styles.cardEyebrow}>YOUR REWARD</div>
+            <div className={styles.cardTitle}>{reward.title}</div>
+            <div className={styles.cardDesc}>{reward.description}</div>
+            <div className={styles.existingRewardCode}>Coupon: {reward.code}</div>
+            {reward.redeemed ? (
+              <div className={styles.cardDesc}>Already used on a previous order this session.</div>
+            ) : isNextPurchaseSpinReward(reward) && !nextPurchaseClaimed ? (
+              <button
+                type="button"
+                className={styles.cardButton}
+                onClick={openNextPurchaseClaim}
+              >
+                Claim ₹100 offer
+              </button>
+            ) : (
+              <button type="button" className={styles.cardButton} onClick={handleContinue}>
+                Collect &amp; continue
+              </button>
+            )}
+          </div>
+        ) : null}
+
+        <button type="button" className={styles.backLink} onClick={handleBack}>
+          <span>
+            {returnTo ? "Go back" : "Back to home"}
           </span>
-          <p>Win amazing offers and discounts</p>
-        </div>
-        <div className={styles.step}>
-          <span className={styles.stepIcon} aria-hidden>
-            <Icon icon="mdi:shopping" width={30} height={30} />
-          </span>
-          <p>Make your purchase and enjoy your reward</p>
-        </div>
+        </button>
       </div>
-
-      <button type="button" className={styles.cta} onClick={spin} disabled={spinDisabled}>
-        SPIN NOW &nbsp;&rsaquo;
-      </button>
-      <div className={styles.tc}>*T&amp;C Apply</div>
-
-      {hasSpun && reward && !nextPurchaseOpen ? (
-        <div className={styles.existingReward}>
-          <div className={styles.cardEyebrow}>YOUR REWARD</div>
-          <div className={styles.cardTitle}>{reward.title}</div>
-          <div className={styles.cardDesc}>{reward.description}</div>
-          <div className={styles.existingRewardCode}>Coupon: {reward.code}</div>
-          {reward.redeemed ? (
-            <div className={styles.cardDesc}>Already used on a previous order this session.</div>
-          ) : isNextPurchaseSpinReward(reward) && !nextPurchaseClaimed ? (
-            <button
-              type="button"
-              className={styles.cardButton}
-              onClick={openNextPurchaseClaim}
-            >
-              Claim ₹100 offer
-            </button>
-          ) : (
-            <button type="button" className={styles.cardButton} onClick={handleContinue}>
-              Collect &amp; continue
-            </button>
-          )}
-        </div>
-      ) : null}
-
-      <button type="button" className={styles.backLink} onClick={handleBack}>
-        <span style={{ fontSize: "24px" }}>
-          {returnTo ? "Go back" : "Back to home"}
-        </span>
-      </button>
 
       <div
         className={`${styles.overlay} ${showResult ? styles.overlayShow : ""}`}

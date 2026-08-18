@@ -211,7 +211,7 @@ const ViewAdminSkincareReport = () => {
           />
 
           {/* Spacer for fixed TopLogo header */}
-          <Box sx={{ pt: { xs: 6, sm: 6 } }} />
+          <Box sx={{ pt: { xs: 12, md: 18 } }} />
 
           {/* <CoverPage
             publicUserProfile={data?.data?.user}
