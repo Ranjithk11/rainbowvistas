@@ -30,7 +30,7 @@ echo [2/5] Saving local changes...
 git add -A
 git commit -m "local changes before update %date% %time%" --allow-empty
 echo     Fetching latest code from git...
-git fetch origin main
+git fetch origin
 if %errorlevel% neq 0 (
     echo.
     echo ERROR: Git fetch failed! Check your internet or git config.
@@ -38,7 +38,18 @@ if %errorlevel% neq 0 (
     pause
     exit /b 1
 )
-git reset --hard origin/main
+:: Use the remote default branch (master or main)
+git rev-parse --verify origin/HEAD >nul 2>&1
+if %errorlevel% equ 0 (
+    git reset --hard origin/HEAD
+) else (
+    git rev-parse --verify origin/master >nul 2>&1
+    if %errorlevel% equ 0 (
+        git reset --hard origin/master
+    ) else (
+        git reset --hard origin/main
+    )
+)
 echo     Code updated successfully!
 
 :: Send Slack notification (if SLACK_WEBHOOK_URL environment variable is set)
