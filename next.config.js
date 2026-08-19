@@ -1,5 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  transpilePackages: ["html5-qrcode"],
   experimental: {
     missingSuspenseWithCSRBailout: false,
     serverComponentsExternalPackages: ["serialport", "@serialport/parser-readline", "better-sqlite3"],
